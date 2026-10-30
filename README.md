@@ -9,7 +9,9 @@ from one GUI.
 ![python](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 
-![Walkthrough: start the stack, inject a leak, train a detector](docs/manual/pyplant_walkthrough.gif)
+![pyplant on one page: the plant, the loop, and four detectors](docs/manual/figures/pyplant-poster.png)
+
+![Walkthrough: start the stack, inject a leak, train a detector](docs/manual/pyplant-walkthrough.gif)
 
 Everything a real plant has is here, at bench scale: a centrifugal pump feeding
 a tank through a control valve, a second tank downstream, a PID loop holding
@@ -29,12 +31,9 @@ Open a leak in tank 1 under a working level controller:
 The level returns to setpoint exactly. The controller has absorbed the fault,
 and its entire signature now lives in the valve position. A detector that
 watches only the process value cannot see this fault at all, which is why every
-detector here is fed the controller output alongside the measurements.
-
-![A setpoint step, then a leak: the level dips and recovers while the controller output climbs](docs/manual/figures/poster_hero.png)
-
-That is the problem this project is built to study: in a closed loop, the
-controller hides the fault you are looking for.
+detector here is fed the controller output alongside the measurements. That is
+the problem this project is built to study: in a closed loop, the controller
+hides the fault you are looking for.
 
 ## What is in it
 
@@ -71,16 +70,60 @@ Open <http://127.0.0.1:8050>.
 4. **Data tab, then Model tab.** Generate a labelled dataset and train the
    detectors.
 
-Or with Docker, nothing installed:
+![The workbench Runtime tab: plant mimic, flows, scan diagnostics, LIC101 faceplate](docs/manual/figures/s04_runtime_mimic.png)
+
+## Deployment
+
+Four ways to run it, from one command to something shaped like a plant.
+[DEPLOYMENT.md](docs/DEPLOYMENT.md) has every flag, the workspace
+`config.json`, platform notes and troubleshooting.
+
+**Workbench.** The usual way. After the install above:
+
+```bash
+pyplant-workbench --workspace ./work/demo --base-port 5400
+```
+
+Open <http://127.0.0.1:8050>. **Start stack** launches the plant, the PLC, the
+historian and the HMI as separate processes and drives them over HTTP. The
+workspace directory holds the config, datasets, trained models and history.
+`--host 0.0.0.0` exposes the GUI past localhost. Two people on one machine
+each need their own workspace, base port and GUI port.
+
+**Services by hand.** The same four processes, started in order, because each
+one connects to the one before. `python examples/run_stack.py` starts all of
+them. The operator page is then at <http://127.0.0.1:5405>, and the fault API,
+with a form for every endpoint, at <http://127.0.0.1:5401/docs>.
+
+**Docker, one container.** Nothing installed except Docker:
 
 ```bash
 docker compose up --build
 ```
 
-[DEPLOYMENT.md](docs/DEPLOYMENT.md) covers running the services individually,
-the four-container deployment, configuration and troubleshooting.
+Open <http://localhost:8050>. The workbench runs inside the container and
+supervises the four services there. Only the GUI port is published. Datasets
+and trained models stay in the `workbench-data` volume across restarts. The
+container runs as an unprivileged user and health-checks the GUI.
 
-![The workbench Runtime tab: plant mimic, flows, scan diagnostics, LIC101 faceplate](docs/manual/figures/s04_runtime_mimic.png)
+**Docker, four containers.** Each service in its own container, on a private
+network, reached by name — a field device, a controller, a historian and an
+operator station:
+
+```bash
+docker compose --profile services up --build plant plc historian hmi
+```
+
+There is no workbench in this mode. The HMI is the interface.
+
+| URL | what |
+| --- | --- |
+| <http://localhost:8080> | operator HMI |
+| <http://localhost:8000/docs> | fault injection API |
+| `opc.tcp://localhost:4840/pyplant/` | OPC UA, for a client such as UaExpert |
+
+If the PLC starts before the plant is listening, it exits and is restarted,
+which is what a controller does when its field device is late.
 
 ## Results
 
