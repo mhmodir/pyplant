@@ -1,0 +1,146 @@
+\documentclass[11pt,a4paper,openany]{book}
+
+% ---------------------------------------------------------------------------
+% Packages
+% ---------------------------------------------------------------------------
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage[margin=2.5cm,headheight=14pt]{geometry}
+\usepackage{amsmath,amssymb,amsfonts,bm}
+\usepackage{graphicx}
+\usepackage{booktabs,tabularx,longtable,array}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{listings}
+\usepackage[most]{tcolorbox}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric,shapes.misc,
+  fit,calc,backgrounds,decorations.pathmorphing,decorations.pathreplacing,
+  matrix,trees}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.16}
+\usepackage{float}
+\usepackage[hidelinks]{hyperref}
+
+\graphicspath{{figures/}}
+\renewcommand{\tabularxcolumn}[1]{>{\raggedright\arraybackslash}p{#1}}
+\captionsetup{font=small,labelfont=bf}
+
+% Walkthrough screenshots: kept in reading order, at a modest size.
+\newcommand{\shot}[3][0.55]{%
+  \begin{figure}[H]\centering
+  \fbox{\includegraphics[width=#1\textwidth]{#2}}
+  \caption{#3}\label{fig:#2}\end{figure}}
+% Element-by-element description that follows each screenshot.
+\newenvironment{elements}
+  {\par\small\noindent\begin{tabular}{@{}>{\raggedright\arraybackslash\bfseries}p{3.4cm}
+     >{\raggedright\arraybackslash}p{\dimexpr\linewidth-3.4cm-2\tabcolsep\relax}@{}}
+   \toprule \textnormal{\textit{Element}} & \textit{What it shows or does}\\\midrule}
+  {\bottomrule\end{tabular}\par\medskip}
+
+% ---------------------------------------------------------------------------
+% Colours and styles
+% ---------------------------------------------------------------------------
+\definecolor{slate}{HTML}{3B4450}
+\definecolor{accent}{HTML}{2F7BD0}
+\definecolor{okgreen}{HTML}{2E9A58}
+\definecolor{badred}{HTML}{CC3A40}
+\definecolor{warnamber}{HTML}{C48612}
+\definecolor{panelgrey}{HTML}{F1F3F6}
+\definecolor{linegrey}{HTML}{D3D8DE}
+\definecolor{codebg}{HTML}{F5F6F8}
+
+\lstdefinestyle{py}{
+  language=Python, basicstyle=\ttfamily\small, backgroundcolor=\color{codebg},
+  frame=single, rulecolor=\color{linegrey}, breaklines=true,
+  keywordstyle=\color{accent}\bfseries, commentstyle=\color{gray}\itshape,
+  stringstyle=\color{okgreen!70!black}, showstringspaces=false,
+  columns=fullflexible, xleftmargin=4pt, xrightmargin=4pt,
+  aboveskip=8pt, belowskip=8pt}
+\lstdefinestyle{sh}{
+  basicstyle=\ttfamily\small, backgroundcolor=\color{codebg}, frame=single,
+  rulecolor=\color{linegrey}, breaklines=true, columns=fullflexible,
+  showstringspaces=false, xleftmargin=4pt, xrightmargin=4pt,
+  aboveskip=8pt, belowskip=8pt}
+\lstset{style=py}
+
+\newtcolorbox{note}[1][Note]{colback=accent!5,colframe=accent,
+  fonttitle=\bfseries,title=#1,sharp corners=south,boxrule=0.6pt}
+\newtcolorbox{warn}[1][Caution]{colback=warnamber!7,colframe=warnamber,
+  fonttitle=\bfseries,title=#1,sharp corners=south,boxrule=0.6pt}
+\newtcolorbox{theory}[1][Theory]{colback=okgreen!5,colframe=okgreen!70!black,
+  fonttitle=\bfseries,title=#1,sharp corners=south,boxrule=0.6pt}
+
+\newcommand{\code}[1]{\texttt{\detokenize{#1}}}
+\newcommand{\tg}[1]{\textsf{\detokenize{#1}}}
+\newcommand{\ui}[1]{\textbf{#1}}
+
+% TikZ styles shared by every diagram
+\tikzset{
+  >={Stealth[length=2.4mm]},
+  box/.style={draw=slate,rounded corners=3pt,fill=panelgrey,align=center,
+    minimum height=9mm,inner sep=5pt,font=\small},
+  hot/.style={box,fill=accent!12,draw=accent},
+  good/.style={box,fill=okgreen!12,draw=okgreen!70!black},
+  bad/.style={box,fill=badred!10,draw=badred},
+  decision/.style={diamond,aspect=2.2,draw=slate,fill=warnamber!12,
+    align=center,font=\small,inner sep=1pt},
+  term/.style={rounded rectangle,draw=slate,fill=slate,text=white,
+    font=\small\bfseries,minimum height=8mm,inner sep=6pt},
+  flow/.style={->,thick,draw=slate},
+  dflow/.style={->,thick,dashed,draw=slate!70},
+  lbl/.style={font=\footnotesize,fill=white,inner sep=1.5pt},
+}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[LE,RO]{\thepage}
+\fancyhead[RE]{\small\leftmark}
+\fancyhead[LO]{\small\rightmark}
+\renewcommand{\headrulewidth}{0.4pt}
+
+\setlist{itemsep=2pt,topsep=4pt}
+\raggedbottom
+\setlength{\emergencystretch}{3em}
+\setcounter{tocdepth}{1}
+
+\title{\Huge\bfseries pyplant\\[6pt]
+  \Large A two-tank process plant with its control, SCADA and\\
+  fault-diagnosis stack, in Python\\[18pt]
+  \large User Manual and Technical Reference}
+\author{pyplant project}
+\date{Version 0.1.0 \,--\, October 2026}
+
+\begin{document}
+\frontmatter
+\maketitle
+\tableofcontents
+
+\mainmatter
+\input{chapters/01_introduction}
+\input{chapters/02_installation}
+\input{chapters/03_workbench}
+\input{chapters/03b_walkthrough}
+\input{chapters/04_tutorials}
+\input{chapters/05_plant}
+\input{chapters/06_control}
+\input{chapters/07_plc}
+\input{chapters/08_scada}
+\input{chapters/09_faults}
+\input{chapters/10_ml}
+\input{chapters/11_dl}
+\input{chapters/12_evaluation}
+\input{chapters/13_parameters}
+\input{chapters/14_extending}
+\input{chapters/15_api}
+\input{chapters/16_troubleshooting}
+
+\appendix
+\input{chapters/A_reference}
+
+\end{document}

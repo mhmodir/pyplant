@@ -1,0 +1,16 @@
+.git
+.github
+.venv
+venv
+env
+work
+docs
+tests
+examples
+**/__pycache__
+**/*.pyc
+.pytest_cache
+*.duckdb
+*.duckdb.wal
+*.parquet
+*.joblib

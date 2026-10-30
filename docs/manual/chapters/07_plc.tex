@@ -1,0 +1,285 @@
+\chapter{The soft PLC}
+\label{ch:plc}
+
+A programmable logic controller is a computer built to run one program
+forever, deterministically, on a fixed cycle. This chapter describes the PLC
+model pyplant implements: the scan cycle, the program and its precedence
+rules, protective logic, timers, the drift-free scheduler and the
+communication layers.
+
+\section{The scan cycle}
+
+Every PLC scan does three things, always in this order:
+
+\begin{enumerate}
+  \item \textbf{Read inputs.} All field inputs are copied into an
+        \emph{input image table} in one operation.
+  \item \textbf{Execute logic.} The program runs against the frozen image.
+        It never reads a field value directly, so every rung in one scan sees
+        the same consistent snapshot.
+  \item \textbf{Write outputs.} The \emph{output image table} is written to
+        the field in one operation.
+\end{enumerate}
+
+\begin{figure}[htbp]
+\centering
+\scalebox{0.8}{%
+\begin{tikzpicture}[node distance=8mm and 10mm]
+  \node[term] (tick) {Ticker fires (every $T_s$)};
+  \node[box,below=of tick,minimum width=52mm] (read) {Read inputs over \code{IOLink}\\$\to$ \code{PlcInput} image};
+  \node[hot,below=of read,minimum width=52mm] (exec) {\code{Program.execute(image)}\\alarms, interlock, PID};
+  \node[box,below=of exec,minimum width=52mm] (write) {Write \code{PlcOutput} image\\over \code{IOLink}};
+  \node[box,below=of write,minimum width=52mm] (diag) {Publish diagnostics\\\tg{SCAN_MS}, \tg{SCAN_OVERRUNS}, \tg{PLC_HEARTBEAT}};
+  \node[decision,right=18mm of exec] (late) {late by\\$\ge T_s$?};
+  \node[bad,right=of late] (ovr) {count\\overrun};
+  \draw[flow] (tick) -- (read);
+  \draw[flow] (read) -- (exec);
+  \draw[flow] (exec) -- (write);
+  \draw[flow] (write) -- (diag);
+  \draw[flow] (diag.west) -- ++(-10mm,0) |- (tick.west);
+  \draw[dflow] (diag.east) -| (late.south);
+  \draw[flow] (late) -- node[lbl,above]{yes} (ovr);
+\end{tikzpicture}}
+\caption{One scan of the PLC engine (\code{pyplant/plc/scan.py}).}
+\label{fig:scan}
+\end{figure}
+
+The engine (\code{ScanEngine}) does not know whether its I/O is in-process or
+Modbus: all I/O goes through the \code{IOLink} protocol. The program
+(\code{Program}) does not know about I/O at all: \code{execute()} is a pure
+function of the input image and the program's retained state, which is what
+makes it testable scan by scan.
+
+\section{The program}
+
+\subsection{Precedence}
+Highest first, as on a real unit:
+\begin{enumerate}
+  \item \textbf{Interlock.} Latched on a trip condition. Forces the pump off,
+        drives the valve shut, and keeps the PID tracking 0\% so a reset
+        cannot slam the valve open. Clears only when the operator resets
+        \emph{and} the condition has gone.
+  \item \textbf{Manual.} The operator's output demand passes through; the PID
+        tracks it so that returning to auto is bumpless.
+  \item \textbf{Auto.} The PID holds \tg{LT101} at \tg{LIC101_SP}.
+\end{enumerate}
+
+\begin{figure}[htbp]
+\centering
+\scalebox{0.8}{%
+\begin{tikzpicture}[node distance=7mm and 12mm]
+  \node[term] (in) {input image};
+  \node[box,below=of in] (alm) {evaluate alarms\\with hysteresis};
+  \node[decision,below=of alm] (trip) {level $>$ 550 mm or\\low flow for 15 s?};
+  \node[bad,right=of trip] (latch) {latch\\interlock};
+  \node[decision,below=of trip] (rst) {latched and\\reset pressed?};
+  \node[good,right=of rst] (unl) {unlatch,\\reset timer};
+  \node[decision,below=of rst] (il) {interlocked?};
+  \node[bad,left=of il] (safe) {OP = 0\%, pump off,\\PID tracks 0\%};
+  \node[decision,below=of il] (auto) {auto?};
+  \node[hot,below left=7mm and 2mm of auto] (pid) {PID step\\eq.~\eqref{eq:velocity}};
+  \node[box,below right=7mm and 2mm of auto] (man) {OP = manual demand,\\PID tracks it};
+  \node[term,below=22mm of auto] (out) {output image};
+  \draw[flow] (in) -- (alm);
+  \draw[flow] (alm) -- (trip);
+  \draw[flow] (trip) -- node[lbl,above]{yes} (latch);
+  \draw[flow] (trip) -- node[lbl,right]{no} (rst);
+  \draw[flow] (rst) -- node[lbl,above]{yes} (unl);
+  \draw[flow] (rst) -- node[lbl,right]{no} (il);
+  \draw[flow] (unl) |- (il);
+  \draw[flow] (latch.east) -- ++(6mm,0) |- (il.east);
+  \draw[flow] (il) -- node[lbl,above]{yes} (safe);
+  \draw[flow] (il) -- node[lbl,right]{no} (auto);
+  \draw[flow] (auto) -| node[lbl,pos=0.3,above]{yes} (pid);
+  \draw[flow] (auto) -| node[lbl,pos=0.3,above]{no} (man);
+  \draw[flow] (pid) |- (out);
+  \draw[flow] (man) |- (out);
+  \draw[flow] (safe.west) -- ++(-5mm,0) |- (out.west);
+\end{tikzpicture}}
+\caption{Decision flow of \code{Program.execute()} in one scan.}
+\label{fig:program}
+\end{figure}
+
+\subsection{Protective functions}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}lXX@{}}
+\toprule
+Function & Trigger & Action \\
+\midrule
+\tg{ALM_LT101_HI} & \tg{LT101} $>$ 500\,mm & alarm, priority medium \\
+\tg{ALM_LT101_LOLO} & \tg{LT101} $<$ 50\,mm & alarm, priority high \\
+\tg{ALM_PT101_HIHI} & \tg{PT101} $>$ 58\,kPa & alarm, priority high \\
+\tg{ILK_PMP101} & \tg{LT101} $>$ 550\,mm, or \tg{FT101} $<$ 1\,L/min for 15\,s while running & latched trip: pump off, valve shut; priority critical \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+All thresholds are read from the tag dictionary, so a respanned instrument
+cannot leave a stale limit behind in the logic.
+
+\begin{theory}[Why minimum flow and not high pressure]
+A centrifugal pump against a shut valve rises to its shut-off head, 60\,kPa
+here. A high-pressure trip below that would fire during any legitimate
+low-output excursion. The real hazard of dead-heading is that no flow carries
+heat away, so the trip is \emph{low flow on a time delay} and high pressure
+is only an alarm.
+\end{theory}
+
+\subsection{Hysteresis}
+A comparator that switches exactly at a limit chatters when the signal rests
+on it, and an alarm list that chatters is one operators stop reading. Each
+alarm is a latching comparator: a high alarm sets when $x \ge L$ and clears
+only when $x \le L - \delta$, with deadbands
+$\delta = 10$\,mm for levels, 2\,kPa for pressure and 0.5\,L/min for flow.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+\begin{axis}[width=0.58\textwidth,height=3.5cm,xlabel={time},ylabel={level (mm)},
+  xmin=0,xmax=10,ymin=470,ymax=520,ytick={490,500},yticklabels={$L-\delta$,$L$},
+  xtick=\empty,grid=major,grid style={linegrey}]
+\addplot[accent,thick,smooth] coordinates {(0,480)(2,497)(3,502)(4,498)(5,503)(6,496)(7,492)(8,488)(10,485)};
+\addplot[badred,very thick,const plot] coordinates {(0,474)(2.6,474)(2.6,514)(7.5,514)(7.5,474)(10,474)};
+\node[font=\footnotesize,badred] at (axis cs:5,517) {alarm on};
+\end{axis}
+\end{tikzpicture}
+\caption{Hysteresis: the alarm (red) sets at $L$ and clears only below
+$L-\delta$, so the wobble between 496 and 503\,mm produces a single alarm.}
+\label{fig:hyst}
+\end{figure}
+
+\subsection{Timers count scans}
+The minimum-flow trip uses an on-delay timer (TON): its output goes true once
+its input has been true for the preset, and resets the moment the input goes
+false. The timer counts \emph{scans}, not seconds. Accumulating
+\code{elapsed += 0.1} reaches $0.9999999999999999$ after ten scans, and a
+timer compared with \code{>=} against a 1.0\,s preset would never fire. Real
+PLC timers count ticks for exactly this reason. The preset is converted once
+to $\operatorname{round}(T/T_s)$ scans.
+
+\section{Drift-free scheduling}
+
+\code{await asyncio.sleep(period)} in a loop schedules the next wake relative
+to when the previous one \emph{finished}, so every microsecond of work is
+added permanently to the phase. The \code{Ticker} in \code{pyplant/clock.py}
+computes absolute targets from a fixed origin instead:
+\begin{equation}
+  t_n = t_0 + n\,\frac{T}{\text{speed}} .
+\end{equation}
+Work eats into the slack, never into the phase. With a 70\,ms body on a
+100\,ms period, 100 ticks land at exactly 10.000\,s rather than 17.000\,s; a
+test asserts this to $10^{-12}$\,s.
+
+\begin{figure}[htbp]
+\centering
+\scalebox{0.8}{%
+\begin{tikzpicture}[x=1.1cm,y=1cm]
+  \draw[->] (0,0) -- (10.5,0) node[right]{time};
+  \foreach \i in {0,...,9}{\draw (\i,0.08) -- (\i,-0.08); }
+  \node[left] at (0,0.6) {\small drift-free};
+  \foreach \i in {0,...,8}{\fill[accent!60] (\i,0.35) rectangle (\i+0.7,0.85);}
+  \node[left] at (0,-0.8) {\small sleep(period)};
+  \foreach \i in {0,...,5}{\fill[badred!50] (\i*1.7,-0.55) rectangle (\i*1.7+0.7,-1.05);}
+  \node[font=\footnotesize] at (5,1.25) {each tick starts on the grid; work uses slack};
+  \node[font=\footnotesize] at (5,-1.45) {each tick starts after the last one ends: phase slips by the work time};
+\end{tikzpicture}}
+\caption{Absolute scheduling (top) against relative sleeping (bottom) with a
+70\% duty cycle.}
+\label{fig:ticker}
+\end{figure}
+
+\subsection{The engine measures itself}
+\tg{SCAN_MS}, \tg{SCAN_OVERRUNS} and \tg{PLC_HEARTBEAT} are real tags, trended
+like any process value. The published statistics are always the previous
+scan's, because this scan's duration is unknown until its write completes,
+which is what real controllers do. When the engine cannot keep up, lateness
+grows without bound against the fixed grid while the overrun count increments
+once per scan; lateness is the signal to watch.
+
+\section{The tag dictionary}
+
+\code{pyplant/tags.py} is the single source of truth for every signal. Each
+\code{Tag} carries a description, kind (analog or bool), owning process,
+Modbus table and address, engineering unit and span, integer scale factor,
+alarm limits, writability and the OPC UA area. Every other module imports its
+I/O definitions from it; nothing else may hard-code an address or a scale
+factor. Appendix~\ref{app:tags} lists all tags.
+
+\subsection{Wire representation}
+Analog values travel in 16-bit Modbus holding registers as
+\begin{equation}
+  w = \operatorname{round}(v\cdot s), \qquad
+  w \in [-32768, 32767],
+\end{equation}
+sent as an unsigned two's-complement word. The scale $s$ is chosen per tag so
+the span fits; this is checked at import. Out-of-range values are clamped,
+not wrapped, so a bad value reads as a pegged instrument rather than a sign
+flip. For \tg{LT101}, $s = 10$: 432.7\,mm travels as 4327 with a resolution
+of 0.1\,mm. Booleans travel in coils as 0 or 1.
+
+\subsection{Ownership and blocks}
+Each tag's \code{owner} (\code{PLANT}, \code{PLC}, \code{OPER}, \code{ML})
+is the only process that may write it. Addresses are grouped into declared
+\emph{blocks} so a client polls a whole span in one Modbus transaction, and
+import fails if a block has a gap, two blocks overlap, or a tag sits in a
+block owned by another process.
+
+\begin{theory}[No block may be written by two parties]
+If one block held both the operator's setpoint and the PLC's readback, an
+operator write arriving between the PLC's read and its publish would be
+overwritten 100\,ms later. The faceplate is therefore split into
+\code{OPER_SP}/\code{OPER_CMD} (HMI writes, PLC reads) and
+\code{PLC_FACE}/\code{PLC_DIAG}/\code{PLC_ALARMS} (PLC writes, HMI reads).
+\end{theory}
+
+\section{Modbus TCP: the field layer}
+
+\begin{figure}[htbp]
+\centering
+\scalebox{0.8}{%
+\begin{tikzpicture}[node distance=6mm and 22mm]
+  \node[box,minimum width=36mm,minimum height=30mm] (plant) {\textbf{plant node}\\Modbus slave\\port 5400\\[3pt]\code{PLANT_MEAS} HR 0--5\\\code{PLANT_STATUS} coil 0\\\code{PLC_CMD} HR 10\\\code{PLC_CMD_BITS} coil 10};
+  \node[hot,minimum width=36mm,minimum height=30mm,right=of plant] (plc) {\textbf{PLC node}\\client below,\\server above\\port 5402};
+  \node[box,minimum width=30mm,right=of plc] (scada) {SCADA clients\\(Modbus or\\OPC UA 5403)};
+  \draw[flow] ([yshift=8mm]plc.west) -- node[lbl,above]{1. read meas} ([yshift=8mm]plant.east);
+  \draw[flow] ([yshift=2.5mm]plc.west) -- node[lbl,above]{2. read status} ([yshift=2.5mm]plant.east);
+  \draw[flow] ([yshift=-3mm]plc.west) -- node[lbl,above]{3. write OP} ([yshift=-3mm]plant.east);
+  \draw[flow] ([yshift=-8.5mm]plc.west) -- node[lbl,above]{4. write pump} ([yshift=-8.5mm]plant.east);
+  \draw[flow,<->] (plc) -- (scada);
+\end{tikzpicture}}
+\caption{Four Modbus round trips per scan, measured at 0.7\,ms against a
+100\,ms budget.}
+\label{fig:modbus}
+\end{figure}
+
+The plant is a Modbus \emph{slave}, as a field device is. It has no controller,
+no alarms and no memory of intent: it applies whatever is in its command
+registers, so if the PLC stops writing, the valve holds its last position, as
+a real one does. The PLC is both client (towards the plant) and server
+(towards SCADA). It mirrors the plant measurements into its own store so the
+HMI polls one address instead of two. Reads are by block, never by tag: one
+\code{read_holding_registers} for six measurements is one round trip.
+
+\section{OPC UA: the information layer}
+
+OPC UA is the boundary between registers and meaning. Below it everything is
+addresses and scale factors; above it the historian and HMI speak tag names
+with units attached and never import a Modbus symbol.
+
+The address space is generated from the tag dictionary. Each tag's
+\code{area} becomes its folder path, e.g.\ \code{Plant/Unit1/LT101},
+\code{PLC/LIC101/LIC101_SP} (writable) or \code{PLC/Diagnostics/SCAN_MS}.
+Every analog node carries \code{EngineeringUnits} and \code{EURange} from its
+declared span, so a client can scale a trend without being told anything about
+the plant.
+
+The server is a \emph{view} of the same \code{TagStore} the Modbus server
+holds, not a second process image. Values are pushed outward on a refresh tick
+only for nodes that changed; client writes are pushed back into the store. To
+stop a refresh from reverting a fresh operator write, \code{refresh()} tracks
+the last value each writable tag was seen to hold and overwrites a writable
+node only when the store changed underneath it.
+
+Clients use \emph{subscriptions}: the server pushes changes at a publishing
+interval, which is why the historian is not a poller.

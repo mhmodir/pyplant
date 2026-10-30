@@ -1,0 +1,267 @@
+\chapter{The plant model}
+\label{ch:plant}
+
+\code{pyplant/core/hybrid_tank.py} holds the physics as pure functions: SI
+units throughout, no sockets, no sleeping, no global state. This chapter
+derives every equation it implements.
+
+\section{State, inputs and outputs}
+
+The state vector is
+\[
+  \bm{x} = \begin{bmatrix} h_1 & h_2 & z \end{bmatrix}^\top,
+\]
+the two levels in metres and the valve stem position $z\in[0,1]$. The inputs
+are the valve command $u\in[0,1]$ and the pump run command. The outputs are
+the instrument readings of Table~\ref{tab:meas}.
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{@{}llll@{}}
+\toprule
+Tag & Quantity & Formula & Span \\
+\midrule
+\tg{LT101} & tank 1 level & $1000\,h_1$ & 0--600\,mm \\
+\tg{LT102} & tank 2 level & $1000\,h_2$ & 0--600\,mm \\
+\tg{FT101} & pump discharge flow & $60\,000\,q_\text{in}$ & 0--20\,L/min \\
+\tg{FT102} & tank 2 outlet flow & $60\,000\,q_\text{out}$ & 0--20\,L/min \\
+\tg{PT101} & pump discharge pressure & $p_\text{pump}/1000$ & 0--100\,kPa \\
+\tg{ZT101} & valve stem position & $100\,z$ & 0--100\,\% \\
+\tg{PMP101_RUN} & pump running feedback & pump command & bool \\
+\bottomrule
+\end{tabular}
+\caption{Measurements. \code{measure()} is the only function that converts SI
+to engineering units.}
+\label{tab:meas}
+\end{table}
+
+\section{Mass balances}
+
+Each tank is a vertical cylinder of cross-section $A$. Conservation of volume
+for an incompressible liquid gives
+\begin{align}
+  A_1 \frac{dh_1}{dt} &= q_\text{in} - q_{12} - q_\text{leak}, \label{eq:tank1}\\
+  A_2 \frac{dh_2}{dt} &= q_{12} - q_\text{out}. \label{eq:tank2}
+\end{align}
+Both tanks are bounded: a level at the overflow lip $h_\text{max}=0.6$\,m
+cannot rise further, and an empty tank cannot drain.
+
+\section{Gravity drains: Torricelli's law}
+
+Flow through an orifice under a head $h$ follows from Bernoulli's equation
+between the free surface and the jet, $v=\sqrt{2gh}$, multiplied by an
+effective discharge area $C_dA$ that lumps the geometric area and the
+contraction coefficient:
+\begin{equation}
+  q = C_dA\,\sqrt{2gh}.
+\end{equation}
+This gives the interconnect, outlet and leak flows:
+\begin{align}
+  q_{12} &= C_dA_{12}\,g_{12}\,\sqrt{2gh_1}, &
+  q_\text{out} &= C_dA_{2,\text{out}}\,\sqrt{2gh_2}, &
+  q_\text{leak} &= C_dA_\text{leak}\,\sqrt{2gh_1},
+\end{align}
+where $g_{12}\le1$ is the fouling factor and $C_dA_\text{leak}\ge0$ the leak
+area. Both are healthy at $g_{12}=1$, $C_dA_\text{leak}=0$.
+
+\section{Pump and valve: an algebraic loop solved in closed form}
+
+A centrifugal pump develops less pressure as it delivers more flow. A
+quadratic curve is the standard approximation:
+\begin{equation}
+  p_\text{pump} = \Delta p_0\,\gamma\left(1-\left(\frac{q}{q_\text{max}}\right)^2\right),
+\end{equation}
+with shut-off pressure $\Delta p_0 = 60$\,kPa, run-out flow
+$q_\text{max} = 25$\,L/min and wear factor $\gamma\le1$.
+
+The control valve passes a flow proportional to the square root of the
+pressure drop across it. The drop is the pump pressure minus the static head
+of tank~1:
+\begin{equation}
+  q = k\sqrt{p_\text{pump}-\rho g h_1}, \qquad k = C_v\,\phi(z).
+\end{equation}
+
+The valve has an \emph{equal-percentage} inherent characteristic with
+rangeability $R=30$: equal increments of stem travel change the flow by equal
+percentages,
+\begin{equation}
+  \phi(z) = R^{\,z-1}, \qquad \phi(1) = 1,\ \phi(0) = 1/R,
+\end{equation}
+and below a seat position of 0.5\% the valve shuts tight. Under a falling
+pump curve, an equal-percentage valve gives a roughly linear
+\emph{installed} characteristic, which is why it is chosen.
+
+Pump pressure depends on flow, and flow depends on pump pressure. Substituting
+one into the other and solving the quadratic gives
+\begin{equation}
+  \boxed{\;q_\text{in} = k\sqrt{\dfrac{\Delta p_0\gamma - \rho g h_1}
+        {1 + k^2\,\Delta p_0\gamma/q_\text{max}^2}}\;}
+  \label{eq:qin}
+\end{equation}
+so no iteration is needed and the system is not stiff at a 50\,ms step. If the
+valve is shut the pump dead-heads at $\Delta p_0\gamma$; if the pump is off,
+$q_\text{in}=0$.
+
+\begin{figure}[htbp]
+\centering
+\begin{subfigure}{0.4\textwidth}
+\begin{tikzpicture}
+\begin{axis}[width=\textwidth,height=3.8cm,xlabel={stem position $z$},
+  ylabel={$\phi(z)$},grid=major,grid style={linegrey},
+  xmin=0,xmax=1,ymin=0,ymax=1]
+\addplot[accent,very thick,domain=0.005:1,samples=80]{30^(x-1)};
+\addplot[slate,dashed,domain=0:1]{x};
+\legend{equal \%, linear}
+\end{axis}
+\end{tikzpicture}
+\caption{Inherent valve characteristic, $R=30$.}
+\end{subfigure}\hfill
+\begin{subfigure}{0.4\textwidth}
+\begin{tikzpicture}
+\begin{axis}[width=\textwidth,height=3.8cm,xlabel={flow (L/min)},
+  ylabel={pressure (kPa)},grid=major,grid style={linegrey},
+  xmin=0,xmax=25,ymin=0,ymax=65]
+\addplot[accent,very thick,domain=0:25,samples=60]{60*(1-(x/25)^2)};
+\addplot[badred,very thick,domain=0:25,samples=60]{0.85*60*(1-(x/25)^2)};
+\addplot[only marks,mark=*,mark size=2pt] coordinates {(10,50.4)};
+\legend{healthy,15\% wear,design point}
+\end{axis}
+\end{tikzpicture}
+\caption{Pump curve, healthy and worn.}
+\end{subfigure}
+\caption{Component characteristics used by the plant model.}
+\label{fig:curves}
+\end{figure}
+
+\section{Valve actuator}
+
+The stem follows the command through a first-order lag with
+$\tau_v = 2$\,s:
+\begin{equation}
+  \tau_v \frac{dz}{dt} = u - z .
+\end{equation}
+
+\section{Numerical integration}
+
+The model is integrated with the classical fourth-order Runge--Kutta method at
+$\Delta t = 50$\,ms:
+\begin{align*}
+  \bm k_1 &= f(\bm x_n,u), &
+  \bm k_2 &= f(\bm x_n + \tfrac{\Delta t}{2}\bm k_1,u),\\
+  \bm k_3 &= f(\bm x_n + \tfrac{\Delta t}{2}\bm k_2,u), &
+  \bm k_4 &= f(\bm x_n + \Delta t\,\bm k_3,u),\\
+  \bm x_{n+1} &= \bm x_n + \tfrac{\Delta t}{6}(\bm k_1+2\bm k_2+2\bm k_3+\bm k_4),
+\end{align*}
+after which levels are clipped to $[0,h_\text{max}]$ and $z$ to $[0,1]$. The
+input is held constant within a step.
+
+\section{Steady state}
+
+At equilibrium $dh_1/dt = 0$. For a fixed valve position, inflow falls and
+outflow rises monotonically with $h_1$, so the residual
+$r(h_1) = q_\text{in} - q_{12} - q_\text{leak}$ has a single root, found by
+bisection. Then $dh_2/dt=0$ gives tank 2 directly:
+\begin{equation}
+  h_2 = \frac{1}{2g}\left(\frac{q_{12}}{C_dA_{2,\text{out}}}\right)^2 .
+\end{equation}
+\code{steady_state()} is used to start the plant lined out and by the tests.
+
+\section{Sizing and the design point}
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{@{}lll@{}}
+\toprule
+Parameter (\code{Params} field) & Value & Meaning \\
+\midrule
+\code{area_tank1}, \code{area_tank2} & 0.020\,m$^2$ & tank cross-sections ($\approx$160\,mm diameter) \\
+\code{height_max} & 0.600\,m & overflow lip \\
+\code{pump_dp0} & 60\,000\,Pa & shut-off pressure \\
+\code{pump_qmax} & $4.17\times10^{-4}$\,m$^3$/s & run-out flow, 25\,L/min \\
+\code{valve_cv} & $2.429\times10^{-6}$ & valve coefficient fully open, m$^3$/(s$\sqrt{\text{Pa}}$) \\
+\code{valve_rangeability} & 30 & equal-percentage $R$ \\
+\code{valve_seat} & 0.005 & tight shut-off below this position \\
+\code{tau_valve} & 2.0\,s & actuator lag \\
+\code{cda_12} & $6.90\times10^{-5}$\,m$^2$ & tank 1 to tank 2 orifice \\
+\code{cda_2out} & $9.00\times10^{-5}$\,m$^2$ & tank 2 drain \\
+\code{pump_gain} & 1.0 & fault knob: $<1$ is impeller wear \\
+\code{cda_12_gain} & 1.0 & fault knob: $<1$ is fouling \\
+\code{cda_leak} & 0.0 & fault knob: leak area \\
+\bottomrule
+\end{tabular}
+\caption{Plant parameters and their defaults.}
+\label{tab:params}
+\end{table}
+
+At the design point the valve is 66\% open, the level is 300\,mm, the flow
+10\,L/min and the pump pressure 50\,kPa. The usable level range is roughly 30
+to 580\,mm, corresponding to valve positions from 0.30 to 0.79.
+
+\section{Linearisation and the process time constant}
+
+Tuning needs a linear model. Around an operating point $(\bar h_1,\bar z)$,
+write $h_1 = \bar h_1 + \delta h$, $z = \bar z + \delta z$ and expand
+equation~\eqref{eq:tank1} to first order:
+\begin{equation}
+  A_1 \frac{d\,\delta h}{dt}
+   = \underbrace{\left(\frac{\partial q_\text{in}}{\partial h_1}
+     - \frac{\partial q_{12}}{\partial h_1}\right)}_{-1/R_h}\delta h
+   + \frac{\partial q_\text{in}}{\partial z}\,\delta z .
+\end{equation}
+Inflow falls as the back-pressure rises, so $\partial q_\text{in}/\partial h_1<0$,
+and outflow rises with head, $\partial q_{12}/\partial h_1 = q_{12}/(2h_1)>0$;
+the bracket is therefore negative and the tank is self-regulating. This is a
+first-order system
+\begin{equation}
+  \tau \frac{d\,\delta h}{dt} + \delta h = K\,\delta z,
+  \qquad \tau = A_1 R_h,\quad K = R_h\frac{\partial q_\text{in}}{\partial z}.
+\end{equation}
+An open-loop step test on the model at the design point gives
+$K \approx 15.4$\,mm per \% of valve travel and $\tau\approx 72$\,s, the
+values the controller is tuned for. The valve lag (2\,s) is small compared
+with $\tau$ and is neglected in tuning.
+
+\begin{figure}[htbp]
+\centering
+\scalebox{0.8}{%
+\begin{tikzpicture}[node distance=12mm]
+  \node[box] (u) {valve command\\$u$};
+  \node[box,right=of u] (v) {actuator\\$\dfrac{1}{\tau_v s+1}$};
+  \node[box,right=of v] (q) {pump + valve\\eq.~\eqref{eq:qin}};
+  \node[hot,right=of q] (t1) {tank 1\\$A_1\dot h_1$};
+  \node[box,right=of t1] (t2) {tank 2\\$A_2\dot h_2$};
+  \draw[flow] (u) -- (v);
+  \draw[flow] (v) -- node[lbl,above]{$z$} (q);
+  \draw[flow] (q) -- node[lbl,above]{$q_\text{in}$} (t1);
+  \draw[flow] (t1) -- node[lbl,above]{$q_{12}$} (t2);
+  \draw[flow] (t1.south) -- ++(0,-8mm) -| node[lbl,pos=0.25,below]{$\rho g h_1$ back-pressure} (q.south);
+  \draw[flow] (t2.east) -- ++(8mm,0) node[right]{$q_\text{out}$};
+  \draw[flow,badred] (t1.north) -- ++(0,7mm) node[above]{$q_\text{leak}$};
+\end{tikzpicture}}
+\caption{Signal flow inside the plant model.}
+\label{fig:plant-signal}
+\end{figure}
+
+\section{The simulation stepper}
+
+\code{pyplant/runners/base.py} holds \code{Simulation}, the one loop body both
+runners drive. It has three deliberately different rates:
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Rate & Default & What it governs \\
+\midrule
+\code{dt} & 50\,ms & integration accuracy \\
+\code{control_period} & 100\,ms & how often the controller sees the plant \\
+\code{log_period} & 1\,s & what the historian and datasets store \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The controller period must be a whole number of integration steps, and time
+is computed from an integer step count rather than by repeated addition, so it
+never accumulates rounding error. Between controller executions the inputs
+are held: a genuine zero-order hold, as on a real PLC. Faults are applied in
+\code{Simulation.integrate()}, the single place both runners share
+(Chapter~\ref{ch:faults}).

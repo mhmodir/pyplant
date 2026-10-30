@@ -1,0 +1,184 @@
+\chapter{Extending the toolbox}
+\label{ch:extend}
+
+pyplant is meant to be changed. This chapter gives recipes for the four most
+common extensions: a new tag, a new fault, a new detector and an online
+inference service. In every case the rule is the same: change the single
+source of truth, then let the tests tell you what else must follow.
+
+\section{Adding a tag}
+
+\begin{figure}[htbp]
+\centering
+\scalebox{0.8}{%
+\begin{tikzpicture}[node distance=6mm]
+  \node[term] (s) {new signal};
+  \node[box,below=of s,minimum width=80mm] (a) {append a \code{Tag} to \code{_TAG_LIST} in \code{tags.py}\\at an address inside an existing block, or widen the block in \code{_BLOCK_LIST}};
+  \node[decision,below=of a] (t) {\code{pytest}\\passes?};
+  \node[bad,right=12mm of t] (fix) {fix hole, overlap, owner,\\scale overflow or duplicate};
+  \node[box,below=of t,minimum width=80mm] (p) {produce it: plant \code{measure()}, PLC \code{PlcOutput}, or a service};
+  \node[decision,below=of p] (m) {should the\\model see it?};
+  \node[box,right=12mm of m] (f) {add to \code{BASE_TAGS} in \code{ml/features.py}\\(and \code{feature_tags()}); regenerate data};
+  \node[good,below=of m] (done) {done: Modbus, OPC UA, historian and HMI pick it up};
+  \draw[flow] (s) -- (a);
+  \draw[flow] (a) -- (t);
+  \draw[flow] (t) -- node[lbl,above]{no} (fix);
+  \draw[flow] (fix) |- (a);
+  \draw[flow] (t) -- node[lbl,right]{yes} (p);
+  \draw[flow] (p) -- (m);
+  \draw[flow] (m) -- node[lbl,above]{yes} (f);
+  \draw[flow] (m) -- node[lbl,right]{no} (done);
+  \draw[flow] (f) |- (done);
+\end{tikzpicture}}
+\caption{Adding a tag.}
+\label{fig:addtag}
+\end{figure}
+
+Because every layer derives its I/O from the tag dictionary, a new tag
+appears in the Modbus map, the OPC UA address space (with its unit and
+range), the historian and the HMI's tag list without further code.
+
+\begin{warn}[\code{DIAG_ORDER} is append-only]
+\tg{TOP_CONTRIB} stores the top channel as an index into \code{DIAG_ORDER}.
+Reordering it changes the meaning of every historised value. Only append.
+\end{warn}
+
+\section{Adding a fault}
+
+\begin{enumerate}
+  \item Decide the entry point (Chapter~\ref{ch:faults}). Either subclass
+        \code{ParameterFault} and implement \code{apply()}, or subclass
+        \code{SignalFault} and implement \code{corrupt()}. A new
+        \emph{command} fault also
+        needs a branch in \code{FaultSet.command()}, which today dispatches
+        only \code{ValveStiction}.
+  \item Set \code{kind} and \code{target} in \code{__post_init__} and return
+        the magnitude from the \code{magnitude} property.
+  \item Register it in \code{FAULT_KINDS} with the attribute a single
+        magnitude number sets. The injection API and the Faults tab dropdown
+        read this table.
+  \item Add a starting magnitude and unit to \code{DEFAULT_MAGNITUDE} and
+        \code{MAGNITUDE_UNITS} in \code{workbench/app.py}.
+  \item Add a representative scenario to \code{library()} so it enters the
+        dataset grid, and, if its magnitude attribute has a new name, teach
+        \code{_scaled()} to scale it.
+  \item If physics names the channel it should isolate to, add it to
+        \code{EXPECTED_CHANNEL} in \code{ml/evaluate.py}.
+  \item Write a test that the fault does what it claims, in
+        \code{tests/test_faults.py}.
+\end{enumerate}
+
+\begin{lstlisting}
+@dataclass
+class OutletBlockage(ParameterFault):
+    """Partial blockage of the tank 2 drain, as fraction of area lost."""
+    loss: float = 0.3
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.kind, self.target = "outlet_blockage", "FE-2OUT"
+
+    @property
+    def magnitude(self) -> float:
+        return self.loss
+
+    def apply(self, p: Params, s: float) -> Params:
+        return replace(p, cda_2out=p.cda_2out * (1.0 - self.loss * s))
+
+FAULT_KINDS["outlet_blockage"] = (OutletBlockage, "loss")
+\end{lstlisting}
+
+\section{Adding a detector}
+
+All detectors share the \code{Detector} base class, which provides
+standardisation, calibration, health index, contributions and persistence.
+A new method needs only two hooks:
+
+\begin{description}
+  \item[\code{_fit_core(Z)}] fit on standardised normal windows.
+  \item[\code{_reconstruct(Z)}] return the reconstruction $\hat Z$. The score
+        is then $\lVert Z - \hat Z\rVert^2$ and contributions come for free.
+        A method with no reconstruction returns zeros and overrides
+        \code{score()} instead, as the isolation forest does.
+\end{description}
+
+\begin{lstlisting}
+from sklearn.covariance import EmpiricalCovariance
+
+@dataclass
+class MahalanobisDetector(Detector):
+    """Hotelling-style distance using the full normal covariance."""
+    cov: EmpiricalCovariance | None = None
+
+    def __post_init__(self) -> None:
+        self.kind = "mahalanobis"
+
+    def _fit_core(self, Z):
+        self.cov = EmpiricalCovariance().fit(Z)
+
+    def _reconstruct(self, Z):
+        return np.zeros_like(Z)          # contributions fall back to z^2
+
+    def score(self, X):
+        return self.cov.mahalanobis(self.scaler.transform(X))
+\end{lstlisting}
+
+Then add it to \code{METHODS} (label shown in the Model tab, in order from
+simplest to most complex) and a branch in \code{make_detector()}. The Model
+tab checklist and the selection rule pick it up automatically. Keep scores
+positive with larger meaning worse, or the health index breaks.
+
+\section{Adding an online inference service}
+
+The \code{ML_RESULT} and \code{ML_ALARMS} blocks are reserved for a service
+that scores the live plant. A minimal design:
+
+\begin{figure}[htbp]
+\centering
+\scalebox{0.8}{%
+\begin{tikzpicture}[node distance=7mm and 11mm]
+  \node[box] (h) {historian API\\\code{/api/window}};
+  \node[hot,right=of h] (i) {inference loop\\every stride (10\,s)};
+  \node[box,right=of i] (d) {\code{Detector.load()}\\\code{detector.joblib}};
+  \node[box,below=of i] (w) {write \tg{HEALTH_INDEX}, \tg{TOP_CONTRIB},\\\tg{ML_HEARTBEAT}, \tg{ALM_HEALTH}};
+  \node[box,below=of w] (hmi) {HMI alarm list\\(\tg{ALM_HEALTH}, LOW)};
+  \draw[flow] (h) -- node[lbl,above]{last 60\,s} (i);
+  \draw[flow] (d) -- (i);
+  \draw[flow] (i) -- (w);
+  \draw[flow] (w) -- node[lbl,right]{Modbus / OPC UA} (hmi);
+\end{tikzpicture}}
+\caption{Sketch of an inference service.}
+\label{fig:inference}
+\end{figure}
+
+\begin{enumerate}
+  \item Every stride, request the last \code{window} seconds of
+        \code{BASE_TAGS} from the historian at 1\,Hz.
+  \item Apply \code{add_derived()} and \code{windows()} to get one feature
+        row.
+  \item Compute \code{health()} and \code{top_channel()}; map the channel to
+        its \code{DIAG_ORDER} index (0 for derived channels or no dominant
+        tag).
+  \item Write the results to the \code{ML_RESULT} block on the PLC's Modbus
+        server; increment \tg{ML_HEARTBEAT} so a stalled service is visible.
+  \item Set \tg{ALM_HEALTH} after the same persistence rule used in
+        evaluation (three consecutive windows above 50).
+  \item Add it to \code{SERVICES} in \code{workbench/supervisor.py} after
+        the historian.
+\end{enumerate}
+
+Remember that historian timestamps are wall clock: at \code{speed} $>1$, ask
+for \code{window / speed} wall seconds.
+
+\section{Testing}
+
+Run the whole suite from the project root:
+\begin{lstlisting}[style=sh]
+python -m pytest -q              # about 370 tests
+python -m pytest tests/test_ml.py -q -k detector
+\end{lstlisting}
+The tests encode the invariants this manual describes: codec round trips,
+registry rules, conservation of mass, step independence, PID properties,
+drift-free scheduling, alarm state transitions, write guards, stiction
+cycles, split leakage and the detector interface. A change that breaks one of
+them has usually broken an assumption somewhere else too.

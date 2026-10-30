@@ -1,0 +1,13 @@
+# Normalise line endings so a Windows checkout does not rewrite every file.
+* text=auto eol=lf
+*.bat text eol=crlf
+
+# Binary assets.
+*.png  binary
+*.gif  binary
+*.pdf  binary
+
+# The LaTeX manual is documentation, not code. Without this GitHub's language
+# bar reports the repository as mostly TeX.
+docs/** linguist-documentation
+*.tex   linguist-documentation

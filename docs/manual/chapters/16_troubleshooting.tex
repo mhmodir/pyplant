@@ -1,0 +1,117 @@
+\chapter{Troubleshooting}
+\label{ch:trouble}
+
+\begin{figure}[htbp]
+\centering
+\scalebox{0.8}{%
+\begin{tikzpicture}[node distance=7mm and 10mm]
+  \node[term] (s) {something is wrong};
+  \node[decision,below=of s] (w) {workbench\\page loads?};
+  \node[bad,right=of w] (w1) {check the terminal; wrong\\Python env or port 8050 busy};
+  \node[decision,below=of w] (st) {all four services\\green on Runtime?};
+  \node[bad,right=of st] (st1) {read the log tail of the first\\red service; ports in use?};
+  \node[decision,below=of st] (v) {values\\plausible?};
+  \node[bad,right=of v] (v1) {interlock tripped? speed $>4\times$?\\stale processes?};
+  \node[decision,below=of v] (m) {model\\results good?};
+  \node[bad,right=of m] (m1) {bigger dataset, longer runs,\\higher quantile};
+  \node[good,below=of m] (ok) {working};
+  \draw[flow] (s) -- (w);
+  \draw[flow] (w) -- node[lbl,above]{no} (w1);
+  \draw[flow] (w) -- node[lbl,right]{yes} (st);
+  \draw[flow] (st) -- node[lbl,above]{no} (st1);
+  \draw[flow] (st) -- node[lbl,right]{yes} (v);
+  \draw[flow] (v) -- node[lbl,above]{no} (v1);
+  \draw[flow] (v) -- node[lbl,right]{yes} (m);
+  \draw[flow] (m) -- node[lbl,above]{no} (m1);
+  \draw[flow] (m) -- node[lbl,right]{yes} (ok);
+\end{tikzpicture}}
+\caption{Where to look first.}
+\label{fig:trouble}
+\end{figure}
+
+\section{Installation and start-up}
+
+\paragraph{\code{SyntaxError} or \code{ImportError: StrEnum} at start.}
+The project needs Python 3.11 or later: the alarm module uses
+\code{enum.StrEnum}, although \code{pyproject.toml} still says 3.10. The base
+interpreter on many machines
+is older; activate the project environment first
+(\code{conda activate pyplant}) or call its \code{python.exe} directly.
+
+\paragraph{\code{pymodbus} errors such as unexpected keyword
+\code{slave}.} The Modbus layer is written against pymodbus 3.8. Reinstall
+the pinned version: \code{pip install "pymodbus>=3.8,<3.9"}.
+
+\paragraph{``ports already in use by something else''.} Another stack, or
+leftover processes from a crashed session, hold the ports. Start with a
+different base (\code{--base-port 5500}) or stop the leftovers. On Windows:
+\begin{lstlisting}[style=sh]
+Get-CimInstance Win32_Process |
+  Where-Object { $_.CommandLine -match 'pyplant\.(services|workbench)' } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+\end{lstlisting}
+On Linux or macOS: \code{pkill -f pyplant.services}.
+
+\paragraph{A service turns red right after start.} The Runtime tab shows the
+last lines of its log, and the full log is in \code{<workspace>/jobs/<name>.log}.
+Services start in order (plant, PLC, historian, HMI), so fix the first red one.
+
+\section{The live stack}
+
+\paragraph{The page is slow or callbacks lag.} When a service is down, each
+request to it would wait for the connection to be refused, which takes about
+2\,s on Windows. The workbench connects with a 0.5\,s timeout and then reports
+the service as down for 2.5\,s without retrying. If the page is still slow,
+stop the stack cleanly and restart it.
+
+\paragraph{\tg{SCAN_OVERRUNS} keeps rising, the loop is sluggish.} The speed
+is too high for the operating system's timer. Use $\le4\times$ on Windows.
+
+\paragraph{The level drops to zero and the pump is off.} The interlock has
+tripped, usually on low flow after the valve was driven shut (manual output
+0\%) or after a large leak. Remove the cause, then press \ui{Reset} on the
+HMI. Acknowledging the alarm alone does not reset the trip.
+
+\paragraph{The HMI says ``not connected''.} The HMI talks to the PLC over OPC
+UA. Check that the PLC service is green and that port 5403 is listening; the
+HMI reconnects on its own once the PLC is up.
+
+\paragraph{Trends are empty for the first seconds.} The historian has to
+receive a value of every requested tag before a window is complete. Wait a few
+seconds after start, or longer for quiet tags (heartbeat 30\,s).
+
+\paragraph{I injected a fault and nothing happens.} Often correct: integral
+action holds the level on setpoint (Section~\ref{sec:masking}). Watch the
+controller output and \code{GET /api/truth}. Slow faults (fouling, wear with
+ramps, stiction) need several minutes of plant time.
+
+\section{Data and models}
+
+\paragraph{``need at least three normal runs''.} Raise \ui{Normal runs} on
+the Data tab to 3 or more (6 is a sensible minimum).
+
+\paragraph{``there is no dataset yet''.} Generate one on the Data tab before
+training. Datasets are stored in the workspace and survive restarts.
+
+\paragraph{\code{PermissionError} on a job state file (Windows).} Antivirus or
+the indexer briefly locks a file the job is rewriting. The job runner retries
+for up to 0.2\,s; if it persists, exclude the workspace directory from
+real-time scanning.
+
+\paragraph{Detection rate is low for one fault mode.} Check the per-mode
+table: if the fault ramps for 20 minutes and runs are 20 minutes long, it never
+develops. Use 3600\,s runs. Low-magnitude variants in the grid are meant to be
+hard.
+
+\paragraph{False alarms on normal runs.} Increase the quantile (0.999), add
+normal runs, or increase the window to smooth noise.
+
+\paragraph{The autoencoder is worse than PCA.} With little data this is
+expected and the selection rule will deploy PCA. Use the Standard or Thorough
+preset.
+
+\section{Starting over}
+
+Deleting the workspace directory is always safe; the next start recreates it
+with defaults. From Python, \code{Workspace(path).reset()} deletes data,
+artefacts, history and the run log but keeps the configuration.

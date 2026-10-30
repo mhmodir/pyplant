@@ -1,0 +1,249 @@
+\chapter{Faults and scenarios}
+\label{ch:faults}
+
+Faults are objects applied to a running plant, never edits to the physics.
+This chapter describes the fault taxonomy in \code{pyplant/faults/model.py},
+the scenarios in \code{pyplant/faults/scenarios.py} that turn faults into
+labelled data, and how to inject faults into the live stack.
+
+\section{Where a fault enters}
+
+There are three places a fault can enter the loop, and which one it uses is
+the most important thing about it.
+
+\begin{figure}[htbp]
+\centering
+\scalebox{0.8}{%
+\begin{tikzpicture}[node distance=8mm and 13mm]
+  \node[hot] (plc) {PLC\\LIC101};
+  \node[box,right=of plc] (valve) {valve\\FCV101};
+  \node[box,right=of valve] (plant) {plant physics\\\code{Params}};
+  \node[box,right=of plant] (inst) {instruments\\LT, FT, PT, ZT};
+  \draw[flow] (plc) -- node[lbl,above]{OP} (valve);
+  \draw[flow] (valve) -- (plant);
+  \draw[flow] (plant) -- (inst);
+  \draw[flow] (inst.south) -- ++(0,-12mm) -| node[lbl,pos=0.25,below]{measurements} (plc.south);
+  \node[bad,above=9mm of valve] (cf) {\textbf{command}\\stiction};
+  \node[bad,above=9mm of plant] (pf) {\textbf{parameter}\\leak, fouling, wear};
+  \node[bad,above=9mm of inst] (sf) {\textbf{signal}\\bias, drift, stuck, noise};
+  \draw[flow,badred] (cf) -- (valve);
+  \draw[flow,badred] (pf) -- (plant);
+  \draw[flow,badred] (sf) -- (inst);
+\end{tikzpicture}}
+\caption{The three fault entry points, applied by \code{FaultSet.command()},
+\code{FaultSet.params()} and \code{FaultSet.measure()}.}
+\label{fig:faultentry}
+\end{figure}
+
+\begin{description}
+  \item[Parameter faults] change the plant itself: the physics really is
+        different afterwards.
+  \item[Command faults] sit between the PLC and the valve: the stem does not
+        do what it is told.
+  \item[Signal faults] corrupt what an instrument reports while the process
+        is unchanged.
+\end{description}
+
+\begin{theory}[Why the entry point matters]
+A level transmitter reading 30\,mm high and a genuine 30\,mm rise produce
+identical numbers in \tg{LT101}. They differ only in what the \emph{rest} of
+the plant does: a real rise changes \tg{LT102} and the outflow, a bias does
+not. A model that has never seen both cannot tell them apart. In a closed
+loop it is worse: the controller acts on the biased reading and moves the
+\emph{true} level 25\,mm down while the displayed level sits on setpoint.
+\end{theory}
+
+\section{Timing}
+
+Every fault has a start $t_s$, an optional end $t_e$ and a ramp $T_r$. Its
+strength at time $t$ is
+\begin{equation}
+  s(t) = \begin{cases}
+   0 & t < t_s \text{ or } t \ge t_e,\\
+   \min\!\big((t-t_s)/T_r,\;1\big) & T_r > 0,\\
+   1 & \text{otherwise.}
+  \end{cases}
+\end{equation}
+The ramp is not cosmetic: an abrupt leak and an incipient one over an hour are
+different detection problems, and a dataset containing only step changes
+trains a detector that is useless on faults that creep.
+
+\section{The fault catalogue}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}lllX@{}}
+\toprule
+Kind & Entry & Magnitude (default) & Effect \\
+\midrule
+\code{leak} & parameter & \code{cda} $2\times10^{-5}$\,m$^2$ & adds a Torricelli drain on tank 1: $q_\text{leak}=C_dA\sqrt{2gh_1}$ \\
+\code{fouling} & parameter & \code{loss} 0.30 & interconnect $C_dA$ multiplied by $(1-\text{loss}\cdot s)$ \\
+\code{pump_wear} & parameter & \code{loss} 0.15 & pump head multiplied by $(1-\text{loss}\cdot s)$ \\
+\code{stiction} & command & \code{deadband} 0.06, \code{slip} 0.04 & stem sticks inside $S$, jumps by $J$ \\
+\code{sensor_bias} & signal & \code{bias} 25 (units) & reading $+\,\text{bias}\cdot s$ \\
+\code{sensor_drift} & signal & \code{rate_per_min} 5 & reading $+\,\text{rate}\cdot(t-t_s)/60$ \\
+\code{sensor_stuck} & signal & none & reading frozen at onset value \\
+\code{sensor_noise} & signal & \code{sigma} 1.0 & reading $+\,\mathcal N(0,(\sigma s)^2)$, seeded \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Signal faults take a \code{tag} (default \tg{LT101}); the corrupted value is
+clamped to the tag's span, so a bias cannot read beyond the instrument's
+range. Several faults can be active together; the label of a sample is the
+sorted list of active fault ids joined by \code{+}, or \code{normal}.
+
+\section{Valve stiction in detail}
+
+Stiction is the most control-relevant fault in the set and the hardest one
+for a detector fed only \tg{LT101}, because its signature lives in the phase
+relationship between \tg{FCV101_OP} and \tg{ZT101}. pyplant implements the
+two-parameter data-driven model (deadband $S$ plus slip jump $J$):
+
+\begin{enumerate}
+  \item While stuck, the stem position $y$ does not move.
+  \item When the command $u$ moves more than $S$ away from $y$, the stem
+        breaks free and lands at $u - \operatorname{sign}(u-y)(S-J)$, i.e.\
+        it jumps by $J$ past the point it would have reached smoothly.
+  \item While moving, the stem follows the command.
+  \item On a reversal of the command direction, it sticks again.
+\end{enumerate}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+\begin{axis}[width=0.5\textwidth,height=4.4cm,xlabel={controller output \tg{FCV101_OP} (\%)},
+  ylabel={stem position \tg{ZT101} (\%)},xmin=58,xmax=78,ymin=58,ymax=78,
+  grid=major,grid style={linegrey},axis equal image=false]
+\addplot[slate!50,dashed,domain=58:78] {x};
+\addplot[badred,very thick,->] coordinates {
+  (62,62)(68,62)(68,66)(74,72)};
+\addplot[badred,very thick,->] coordinates {
+  (74,72)(68,72)(68,68)(62,62)};
+\node[font=\footnotesize] at (axis cs:65,60.6) {stuck: deadband $S$};
+\node[font=\footnotesize,anchor=west] at (axis cs:68.3,64) {slip $J$};
+\node[font=\footnotesize] at (axis cs:71,73.5) {stuck on reversal};
+\node[font=\footnotesize,anchor=east] at (axis cs:67.7,70) {slip $J$};
+\end{axis}
+\end{tikzpicture}
+\caption{Idealised stiction cycle in the OP--stem plane. A healthy valve lies
+on the dashed diagonal; a sticky one traces a parallelogram.}
+\label{fig:stiction}
+\end{figure}
+
+In a closed loop with integral action the result is a \emph{limit cycle}: the
+controller keeps winding until the stem slips, the level overshoots, the
+controller winds back the other way, the stem sticks on the reversal, and the
+pattern repeats. The parameters are fractions of full stroke and the slip
+cannot exceed the deadband.
+
+\section{Instrument noise is not a fault}
+
+Every scenario adds Gaussian noise to the transmitters:
+
+\begin{center}
+\begin{tabular}{@{}lccccc@{}}
+\toprule
+Tag & \tg{LT101} & \tg{LT102} & \tg{FT101} & \tg{PT101} & \tg{ZT101} \\
+\midrule
+$\sigma$ & 0.4\,mm & 0.4\,mm & 0.03\,L/min & 0.08\,kPa & 0.05\,\% \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+It is applied as \emph{benign} \code{SensorNoise} faults: recorded, never
+labelled positive. This is not decoration. A perfectly quiet loop never moves
+its valve, so stiction cannot produce a limit cycle at all, and a detector
+trained on noiseless signals learns a threshold that collapses the moment it
+meets a real transmitter.
+
+\section{Scenarios}
+
+A \code{Scenario} is a reproducible run: a duration, a setpoint programme, a
+fault timeline, a seed, plant parameters and a noise table. Running it
+produces a trajectory in which every sample is labelled.
+
+\begin{figure}[htbp]
+\centering
+\scalebox{0.8}{%
+\begin{tikzpicture}[node distance=7mm]
+  \node[term] (s) {\code{Scenario}};
+  \node[box,below=of s] (w) {start at steady state, \code{settle()}\\warm-up up to 1800\,s (not recorded)};
+  \node[box,below=of w] (r) {reset clock to $t=0$, attach fresh \code{FaultSet}\\(scenario faults + benign noise)};
+  \node[box,below=of r] (run) {run \code{duration} seconds at $\Delta t=0.05$\,s,\\PLC every 0.1\,s, log every 1\,s};
+  \node[good,below=of run] (out) {\code{ScenarioResult}: trajectory, labels, events};
+  \draw[flow] (s) -- (w);
+  \draw[flow] (w) -- (r);
+  \draw[flow] (r) -- (run);
+  \draw[flow] (run) -- (out);
+\end{tikzpicture}}
+\caption{\code{run_scenario()}. The warm-up stops a model from learning that
+``faults happen at the start''.}
+\label{fig:runscenario}
+\end{figure}
+
+Fault objects are stateful (stiction carries a stem position), so a fresh copy
+is built for every run and the scenario's own fault list is never mutated.
+
+\subsection{The library}
+\code{library(duration)} returns one representative scenario per fault mode
+plus normal operation, each with onset at 40\% of the duration and the
+setpoint programme 300, 340, 280, 300\,mm at 0, 900, 1800, 2700\,s:
+
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+Name & Description \\
+\midrule
+\code{normal} & setpoint moves only, no fault \\
+\code{leak_abrupt} & tank 1 leak, step onset \\
+\code{leak_incipient} & tank 1 leak opening over fifteen minutes \\
+\code{pump_wear} & impeller wear 18\%, 600\,s ramp \\
+\code{fouling} & interconnect restriction 35\%, 1200\,s ramp \\
+\code{sensor_bias} & \tg{LT101} reads 25\,mm high \\
+\code{sensor_drift} & \tg{LT101} drifting up at 1.5\,mm/min \\
+\code{sensor_stuck} & \tg{LT101} frozen \\
+\code{stiction} & FCV101 sticking, deadband 6\%, slip 4\% \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{The grid}
+\code{grid(duration, magnitudes, repeats)} sweeps each fault mode across
+\code{magnitudes} scale factors from 0.5 to 1.5, repeats each with different
+seeds, and draws a random onset between 25\% and 60\% of the duration. It also
+adds \code{repeats} normal runs. A model therefore cannot learn ``the fault
+starts at 24 minutes'' instead of learning the fault. The number of scenarios
+is
+\begin{equation}
+  N = \text{repeats}\,\big(1 + 8\times\text{magnitudes}\big),
+\end{equation}
+so the Standard preset (3 magnitudes, 2 repeats) builds 50 scenarios.
+\code{default_dataset()} then tops the normal runs up to \code{normal_runs}
+(10 for Standard), giving 58 runs in all.
+
+\section{Injecting faults into the live stack}
+
+The plant service exposes an injection API (Chapter~\ref{ch:api}); the
+workbench \ui{Faults} tab is a form over it.
+
+\begin{enumerate}
+  \item Start the stack from \ui{Runtime} and wait for all services to be up.
+  \item On \ui{Faults}, choose a kind, a magnitude, a ramp and, for sensor
+        faults, a tag. Times are in plant seconds from now.
+  \item Press \ui{Inject}. The fault appears in the active list with its id.
+  \item Watch the HMI: the PV may not move at all (integral action), but the
+        OP and the health index will.
+  \item Clear one fault or all of them. \code{GET /api/truth} always returns
+        the true state, including what the instruments do not show.
+\end{enumerate}
+
+From Python:
+\begin{lstlisting}
+from pyplant.faults.model import Leak
+from pyplant.faults.scenarios import Scenario, run_scenario
+sc = Scenario("my_leak", duration=1800,
+              faults=[Leak("leak", t_start=600, cda=3e-5, ramp=300)])
+res = run_scenario(sc)
+df = res.frame()        # time series + label + faulty columns
+print(res.events)       # ground truth
+\end{lstlisting}

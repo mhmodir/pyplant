@@ -1,0 +1,170 @@
+\chapter{API reference}
+\label{ch:api}
+
+Every service has a small JSON-over-HTTP API, and every layer has a Python
+API. This chapter lists both. Ports are the workbench defaults with base
+5400 (Table~\ref{tab:ports}); add your own base offset if you changed it.
+
+\section{Plant control API (port 5401)}
+
+Fault injection for the live plant. It is deliberately separate from anything
+the control system can see: an operator, the HMI or a diagnosis model must
+not be able to find out that a fault was injected except by observing the
+plant.
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}llX@{}}
+\toprule
+Method & Path & Purpose \\
+\midrule
+GET & \code{/api/faults} & plant time, available kinds, real faults, instrument noise entries, ids active now \\
+POST & \code{/api/fault} & inject a fault; returns its label; 422 if invalid \\
+DELETE & \code{/api/fault/{id}} & remove one fault; 404 if unknown \\
+DELETE & \code{/api/faults} & remove all real faults, keep instrument noise \\
+GET & \code{/api/truth} & current label, true and reported measurements \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+The \code{POST /api/fault} body:
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Field & Default & Meaning \\
+\midrule
+\code{kind} & required & one of \code{FAULT_KINDS} \\
+\code{id} & \code{<kind>_<t>} & unique id \\
+\code{magnitude} & kind default & value of the kind's magnitude attribute \\
+\code{tag} & \tg{LT101} & sensor faults only \\
+\code{delay} & 0 & plant seconds from now until onset \\
+\code{duration} & none & plant seconds until the fault ends \\
+\code{ramp} & 0 & seconds to full magnitude \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{lstlisting}[style=sh]
+# PowerShell
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:5401/api/fault `
+  -ContentType application/json `
+  -Body '{"kind":"leak","magnitude":5e-5,"ramp":300}'
+Invoke-RestMethod http://127.0.0.1:5401/api/truth
+
+# bash / curl
+curl -X POST localhost:5401/api/fault -H "Content-Type: application/json" \
+     -d '{"kind":"sensor_bias","tag":"LT101","magnitude":25}'
+curl -X DELETE localhost:5401/api/faults
+\end{lstlisting}
+
+\section{Historian query API (port 5404)}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}llX@{}}
+\toprule
+Method & Path & Purpose \\
+\midrule
+GET & \code{/api/health} & row count, tag count, time span, collector statistics \\
+GET & \code{/api/window} & query \code{tags=A,B}, \code{seconds=300}, \code{freq=1}: the last \code{seconds} of the listed tags on a regular grid (LOCF); \code{null} where no value yet; 404 for unknown tags \\
+GET & \code{/api/latest} & query \code{tags=A,B}: most recent good value per tag (all tags if omitted) \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\section{HMI API (port 5405)}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}llX@{}}
+\toprule
+Method & Path & Purpose \\
+\midrule
+GET & \code{/} & the operator page \\
+GET & \code{/api/state} & connected flag, last update, all values, active alarm list, alarm summary, poll and error counts \\
+GET & \code{/api/tags} & tag dictionary: description, unit, span, kind, writable \\
+GET & \code{/api/trend} & query \code{tags}, \code{seconds}, \code{freq}: trend data via the historian; 503 if none \\
+POST & \code{/api/setpoint} & body \code{{"value": 320}}: write \tg{LIC101_SP} \\
+POST & \code{/api/manual} & body \code{{"value": 70}}: write \tg{LIC101_MAN_OP} \\
+POST & \code{/api/mode} & body \code{{"auto": false}}: auto or manual \\
+POST & \code{/api/pump} & body \code{{"start": true}}: pump start request \\
+POST & \code{/api/reset} & pulse alarm and interlock reset \\
+POST & \code{/api/alarms/ack} & body \code{{"tag": "ILK_PMP101"}}: acknowledge one alarm; \code{null} acknowledges all \\
+POST & \code{/api/alarms/shelve} & body \code{{"tag": ..., "minutes": 30, "reason": ...}}; at most 8\,h \\
+POST & \code{/api/alarms/unshelve} & body \code{{"tag": ...}}: return a shelved alarm to service \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Writes are guarded (404 unknown tag, 403 not writable, 422 out of span, 503
+not connected), as described in Chapter~\ref{ch:scada}.
+
+\section{Industrial protocols}
+
+\begin{description}
+  \item[Modbus TCP, plant (5400)] holding registers 0--5 (measurements),
+        coil 0 (pump running); the PLC writes HR 10 (valve) and coil 10
+        (pump).
+  \item[Modbus TCP, PLC (5402)] the full tag map of Appendix~\ref{app:tags}.
+        Any Modbus client can read it; the operator blocks are writable.
+  \item[OPC UA, PLC (5403)] endpoint
+        \\ \code{opc.tcp://127.0.0.1:5403/pyplant/}, \\ nodes under
+        \code{Plant/Unit1}, \code{PLC/LIC101}, \code{PLC/Commands},
+        \code{PLC/Alarms}, \code{PLC/Diagnostics}, with engineering units and
+        ranges. Browse it with any OPC UA client, e.g.\ UaExpert.
+\end{description}
+
+\section{Python API}
+
+\subsection{Tags}
+\begin{lstlisting}
+from pyplant.tags import tag, tags_in, TAGS, BLOCKS
+lt = tag("LT101")
+lt.encode(432.7)        # 4327 on the wire
+lt.decode(4327)         # 432.7
+lt.path                 # 'Plant/Unit1/LT101'
+lt.limits.hihi          # 550.0
+tags_in("PLANT_MEAS")   # the six tags polled in one read
+\end{lstlisting}
+
+\subsection{Plant physics}
+\begin{lstlisting}
+import numpy as np
+from pyplant.core.hybrid_tank import Params, Inputs, step, steady_state, measure
+p, u = Params(), Inputs(valve_cmd=0.662, pump_on=True)
+x = steady_state(u, p)               # analytic equilibrium
+x = step(x, u, p, dt=0.05)           # one RK4 step
+measure(x, u, p)                     # {'LT101': 300.3, 'FT101': 10.05, ...}
+\end{lstlisting}
+
+\subsection{Simulation and runners}
+\begin{lstlisting}
+from pyplant.runners.base import Simulation, piecewise
+from pyplant.runners.fast import run, settle
+sim = Simulation.at_steady_state(Inputs(0.60, True), policy=piecewise([
+    (0.0, Inputs(0.60, True)), (300.0, Inputs(0.70, True))]))
+tr = run(sim, duration=1800.0, log_period=1.0)
+tr.to_dataframe()
+\end{lstlisting}
+
+\subsection{Main modules}
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}lX@{}}
+\toprule
+Object & Purpose \\
+\midrule
+\code{plc.pid.PID}, \code{PidTuning} & velocity PID; \code{step()}, \code{track()} \\
+\code{plc.program.Program} & one scan: \code{execute(PlcInput) -> PlcOutput} \\
+\code{plc.harness.PlcHarness} & program as a simulation policy, no network \\
+\code{plc.scan.ScanEngine} & real-time scan cycle over an \code{IOLink} \\
+\code{clock.Ticker} & drift-free periodic wake-ups \\
+\code{faults.model} & fault classes, \code{FaultSet}, \code{build_fault} \\
+\code{faults.scenarios} & \code{Scenario}, \code{run_scenario}, \code{library}, \code{grid} \\
+\code{hist.db.Historian} & DuckDB store; \code{write}, \code{get_window}, \code{covered_span} \\
+\code{hmi.alarms.AlarmManager} & ISA-18.2 alarm list \\
+\code{ml.dataset} & \code{build}, \code{default_dataset}, \code{split_scenarios}, \code{windowed} \\
+\code{ml.features} & \code{add_derived}, \code{windows}, \code{WindowSpec} \\
+\code{ml.detector} & detectors, \code{make_detector}, \code{METHODS} \\
+\code{ml.evaluate.evaluate} & \code{Report} with FAR, delay, isolation \\
+\code{workbench.workspace.Workspace} & config, run log, paths \\
+\code{workbench.supervisor.Supervisor} & start and stop the four services \\
+\bottomrule
+\end{tabularx}
+\end{center}

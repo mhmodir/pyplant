@@ -1,0 +1,195 @@
+\chapter{Evaluating and selecting a detector}
+\label{ch:eval}
+
+A detector's numbers mean nothing unless the data split is honest and the
+metrics are the ones an operator would recognise. This chapter describes the
+split in \code{pyplant/ml/dataset.py}, the metrics in
+\code{pyplant/ml/evaluate.py}, and the rule that picks the detector to
+deploy.
+
+\section{Split by scenario, never by sample}
+
+Windows overlap, and neighbouring windows from one run are nearly identical. A
+random sample split puts window 41 in training and window 42 in test; the
+model scores brilliantly on data it has effectively already seen, and the
+number is not slightly optimistic, it is meaningless. Whole runs are split
+instead.
+
+\begin{figure}[htbp]
+\centering
+\scalebox{0.8}{%
+\begin{tikzpicture}[node distance=5mm and 14mm]
+  \node[box,minimum width=40mm] (all) {all scenarios};
+  \node[good,below left=8mm and 4mm of all,minimum width=34mm] (nor) {normal runs\\(shuffled, seed)};
+  \node[bad,below right=8mm and 4mm of all,minimum width=34mm] (fau) {faulty runs};
+  \node[box,below=10mm of nor,xshift=-34mm] (tr) {train\\60\%};
+  \node[box,right=of tr] (ca) {calibrate\\20\%};
+  \node[box,right=of ca] (tn) {test normal\\20\%};
+  \node[box,right=of tn] (tf) {test faulty\\100\%};
+  \draw[flow] (all) -- (nor);
+  \draw[flow] (all) -- (fau);
+  \draw[flow] (nor) -- (tr);
+  \draw[flow] (nor) -- (ca);
+  \draw[flow] (nor) -- (tn);
+  \draw[flow] (fau) -- (tf);
+  \node[below=1mm of tr,font=\footnotesize] {fit model};
+  \node[below=1mm of ca,font=\footnotesize] {set threshold};
+  \node[below=1mm of tn,font=\footnotesize] {false alarms};
+  \node[below=1mm of tf,font=\footnotesize] {detection, delay, isolation};
+\end{tikzpicture}}
+\caption{\code{split_scenarios()}. Normal runs are divided three ways; faulty
+runs are used only for testing.}
+\label{fig:split}
+\end{figure}
+
+Each pool has a single job. Using one pool for fitting, thresholding and false
+alarm measurement flatters the threshold. At least three normal runs are
+required; the Quick preset makes six and the Standard preset ten. Because each
+grid entry has its own seed, magnitude and onset, held-out runs differ from
+training runs in the ways that matter operationally.
+
+\section{Persistence}
+
+A single flagged window is not a detection. A detection is declared at the
+first window of the first run of $p = 3$ consecutive flagged windows
+(\code{PERSISTENCE}). With a 10\,s stride this costs at most 20\,s of delay.
+
+\begin{figure}[htbp]
+\centering
+\scalebox{0.8}{%
+\begin{tikzpicture}[x=6mm,y=6mm]
+  \foreach \i/\f in {0/0,1/1,2/0,3/0,4/1,5/1,6/0,7/0,8/1,9/1,10/1,11/1,12/1}{
+    \ifnum\f=1 \fill[badred!60] (\i,0) rectangle (\i+0.9,0.9);
+    \else \fill[panelgrey] (\i,0) rectangle (\i+0.9,0.9); \draw[linegrey] (\i,0) rectangle (\i+0.9,0.9); \fi
+  }
+  \draw[okgreen!70!black,very thick] (7.95,-0.1) rectangle (10.95,1.0);
+  \node[font=\footnotesize,below] at (9.45,-0.15) {detection declared here (3 in a row)};
+  \node[font=\footnotesize,above] at (1.45,1.0) {flicker: ignored};
+  \node[font=\footnotesize,above] at (4.95,1.0) {2 in a row: ignored};
+  \node[font=\footnotesize,left] at (0,0.45) {window flags};
+\end{tikzpicture}}
+\caption{The persistence rule. Isolated flags never count, either as
+detections or as false alarms.}
+\label{fig:persist}
+\end{figure}
+
+A detector that flickers above threshold one window in twenty has a
+fine-looking detection rate and is unusable. The same rule counts false
+alarms, so both numbers describe the same detector.
+
+\section{The metrics}
+
+\subsection{False alarms per day}
+Measured on the held-out normal runs:
+\begin{equation}
+  \text{FAR} = \frac{\text{number of persistent excursions}}
+                    {\text{normal time covered (s)}} \times 86\,400 .
+\end{equation}
+Operators experience alarms per shift, not per sample. The report also gives
+the raw fraction of normal windows above threshold, which should be close to
+$1-q$.
+
+\subsection{Detection rate and delay}
+For each faulty test run, the detection delay is the time from the declared
+onset to the first persistent detection after it:
+\begin{equation}
+  \tau_d = t_\text{detect} - t_\text{onset} .
+\end{equation}
+Detection rate is the fraction of faulty runs detected; the report gives the
+median delay overall and per fault mode. Incipient faults (long ramps) have
+naturally longer delays.
+
+\subsection{Isolation accuracy}
+Once a fault has fully developed (ramp finished plus
+\code{DEVELOPED_AFTER} $= 300$\,s), the most frequent top channel over the
+remaining windows is compared with the channel physics names
+(Chapter~\ref{ch:ml}). Judging earlier is wrong: fouling ramping over twenty
+minutes is still a transient five minutes in, and the transient implicates
+the controlled level rather than the downstream one.
+
+If a run ends before the fault has developed, isolation is judged on the last
+quarter of the post-onset data and the run is marked as not fully developed.
+
+\subsection{Consistency}
+For each mode, the fraction of runs whose top channel is that mode's most
+common top channel. It needs no ground truth, so it is the only isolation
+number available for sensor faults.
+
+\begin{warn}[Why sensor faults are not scored for isolation]
+In a closed loop, a level transmitter reading 25\,mm high is driven back to
+setpoint by the controller: the reading looks perfect and the true level sits
+25\,mm low. The signature appears everywhere \emph{except} the faulty
+instrument, so ``the top channel should be \tg{LT101}'' is exactly backwards.
+Scoring against that expectation would be scoring against a mistake.
+\end{warn}
+
+\section{Selecting the detector}
+
+Each chosen method is fitted, calibrated and evaluated on the same split. The
+one deployed is
+\begin{equation}
+  \arg\max_m \big(\text{detection rate}_m,\; -\text{FAR}_m\big)
+\end{equation}
+in lexicographic order: more detections wins, a tie goes to fewer false
+alarms, and remaining ties go to the simpler model because the methods are
+tried simplest first (z-score, PCA, isolation forest, autoencoder). A learned
+detector that cannot beat PCA is not deployed just because it is newer.
+
+\begin{figure}[htbp]
+\centering
+\scalebox{0.8}{%
+\begin{tikzpicture}[node distance=7mm]
+  \node[term] (s) {methods ticked on \ui{Model}};
+  \node[box,below=of s] (f) {for each: fit, calibrate, evaluate};
+  \node[decision,below=of f] (d) {highest\\detection rate?};
+  \node[decision,below=10mm of d] (t) {tie: fewest\\false alarms?};
+  \node[decision,below=10mm of t] (u) {still tied:\\simplest method};
+  \node[good,below=of u] (o) {\code{artifacts/detector.joblib}\\+ \code{manifest.json}, \code{metrics.json}};
+  \draw[flow] (s) -- (f);
+  \draw[flow] (f) -- (d);
+  \draw[flow] (d) -- (t);
+  \draw[flow] (t) -- (u);
+  \draw[flow] (u) -- (o);
+\end{tikzpicture}}
+\caption{Model selection in \code{train_detector()}.}
+\label{fig:select}
+\end{figure}
+
+\section{Reference results}
+
+With the full dataset (58 one-hour runs: \code{python -m pyplant.ml.train
+--duration 3600}) the project's reference numbers are:
+
+\begin{center}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+& Detection & Median delay & False alarms & Isolation \\
+\midrule
+PCA (MSPC baseline) & 83.3\% & 256\,s & 0 / day & 60\% \\
+Autoencoder & \textbf{100\%} & \textbf{70\,s} & \textbf{0 / day} & \textbf{73\%} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+PCA detects only a third of the sensor bias and drift runs; the autoencoder
+detects all of them. The physics channels do the isolation: leak runs point at
+\tg{FLOW_IMBALANCE} 12 out of 12 times, pump wear at \tg{HEAD_RESIDUAL} 6/6
+and stiction at \tg{OP_MINUS_ZT} 6/6. The raw window flag rate on normal runs
+is 0.14\% and there are no persistent excursions. The z-score and isolation
+forest detectors were added later; run them on your own dataset to place them
+in this table. Smaller presets give noisier numbers.
+
+\section{Reading the Model tab}
+
+\begin{enumerate}
+  \item The comparison table has one row per method: detection rate, median
+        delay, false alarms per day, flagged normal windows and isolation.
+        The deployed method is marked \emph{(selected)}.
+  \item The per-mode table shows, for the selected method, the number of runs
+        of each fault mode, the fraction detected, the median delay, the most
+        common top channel and the channel physics expects.
+  \item A low detection rate on one mode with a long delay usually means the
+        fault was still ramping when the run ended; use longer runs.
+  \item A non-zero false alarm rate means the threshold is too low for this
+        data: raise the quantile (e.g.\ 0.999) or generate more normal runs.
+\end{enumerate}

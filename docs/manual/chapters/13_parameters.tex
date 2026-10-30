@@ -1,0 +1,271 @@
+\chapter{Changing parameters}
+\label{ch:params}
+
+Parameters live in four places: the workbench forms, the workspace
+\code{config.json}, the command-line flags of each service, and constants in
+the code. This chapter says which is which, what each parameter does, and how
+to change it safely.
+
+\section{Where a parameter takes effect}
+
+\begin{figure}[htbp]
+\centering
+\scalebox{0.8}{%
+\begin{tikzpicture}[node distance=7mm and 12mm]
+  \node[hot,minimum width=34mm] (ui) {workbench forms\\speed, data, model};
+  \node[box,right=of ui,minimum width=34mm] (cfg) {\code{config.json}\\in the workspace};
+  \node[box,right=of cfg,minimum width=34mm] (sup) {supervisor\\builds command lines};
+  \node[box,below=of sup,minimum width=34mm] (svc) {services\\plant, PLC, historian, HMI};
+  \node[box,below=of cfg,minimum width=34mm] (jobs) {jobs\\dataset, training};
+  \node[bad,below=of ui,minimum width=34mm] (code) {code constants\\\code{Params}, \code{PidTuning}, tags};
+  \draw[flow] (ui) -- node[lbl,above]{saves} (cfg);
+  \draw[flow] (cfg) -- (sup);
+  \draw[flow] (sup) -- node[lbl,right]{CLI flags} (svc);
+  \draw[flow] (ui) |- ([yshift=2mm]jobs.west);
+  \draw[flow] (code) -- node[lbl,below]{defaults} (jobs);
+  \draw[flow] (code.south) -- ++(0,-6mm) -| node[lbl,pos=0.25,below]{defaults} (svc.south);
+\end{tikzpicture}}
+\caption{How a parameter reaches the code that uses it.}
+\label{fig:paramflow}
+\end{figure}
+
+\begin{warn}[What is and is not wired]
+The supervisor passes only \code{dt}, \code{speed}, \code{loop.setpoint} and
+\code{loop.scan_period} from \code{config.json} to the services. The
+\code{plant} section and \code{loop.kc}, \code{ti}, \code{td}, \code{tf} are
+saved and read back, but the live services always use the code defaults of
+\code{Params} and \code{PidTuning}. To experiment with plant parameters or
+tuning, use the offline harness (Section~\ref{sec:offline}) or change the
+defaults in the code.
+\end{warn}
+
+\section{The workspace configuration}
+
+\code{config.json} is created on first start and rewritten atomically (to a
+temporary file, then moved into place) whenever the workbench saves.
+
+\begin{lstlisting}[style=sh]
+{
+  "name": "demo",
+  "speed": 1.0,            // real-time factor of the live stack
+  "dt": 0.05,              // s, plant integration step
+  "ports": { "plant_modbus": 5400, "plant_control": 5401, "plc_modbus": 5402,
+             "plc_opcua": 5403, "historian_api": 5404, "hmi": 5405 },
+  "plant": { "area_tank1": 0.02, "area_tank2": 0.02, "height_max": 0.6,
+             "pump_dp0": 60000.0, "pump_qmax": 0.000417,
+             "valve_cv": 2.429e-06, "valve_rangeability": 30.0,
+             "tau_valve": 2.0, "cda_12": 6.9e-05, "cda_2out": 9e-05 },
+  "loop":  { "kc": 0.35, "ti": 72.0, "td": 0.0, "tf": 5.0,
+             "setpoint": 300.0, "scan_period": 0.1 },
+  "data":  { "duration": 3600.0, "magnitudes": 3, "repeats": 2,
+             "normal_runs": 10, "window": 60, "stride": 10,
+             "quantile": 0.995, "seed": 0 }
+}
+\end{lstlisting}
+(JSON has no comments; they are added here for explanation.) Edit it with the
+workbench stopped, or use the forms. A missing key falls back to its default.
+
+\subsection{Runtime parameters}
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}lllX@{}}
+\toprule
+Parameter & Default & Set from & Effect \\
+\midrule
+\code{speed} & 1.0 & \ui{Runtime} menu & real-time factor of plant and PLC (1, 2, 4, 10 or 20); saved when the stack starts \\
+\code{dt} & 0.05\,s & \code{config.json} & RK4 integration step of the plant \\
+\code{loop.setpoint} & 300\,mm & \code{config.json} & initial LIC101 setpoint; the operator can change it live \\
+\code{loop.scan_period} & 0.10\,s & \code{config.json} & PLC scan period $T_s$ \\
+\code{ports} & base 5400 & \code{--base-port} & six consecutive ports from the base \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\begin{warn}[Speed on Windows]
+At \code{speed} $s$ the PLC wakes every $T_s/s$ wall seconds. Windows timers
+have a granularity of about 15.6\,ms, so above $4\times$ the scan period
+($25$\,ms at $4\times$) approaches the timer resolution and scans overrun.
+Use $\le 4\times$ on Windows; slow faults such as stiction need a few process
+time constants (72\,s each) to develop.
+\end{warn}
+
+\subsection{Dataset parameters (Data tab)}
+\begin{center}
+\begin{tabular}{@{}lllll@{}}
+\toprule
+Parameter & Meaning & Quick & Standard & Thorough \\
+\midrule
+\code{duration} & seconds per run & 1200 & 3600 & 3600 \\
+\code{magnitudes} & scale factors per fault & 1 & 3 & 5 \\
+\code{repeats} & seeds per magnitude & 1 & 2 & 3 \\
+\code{normal_runs} & minimum normal runs ($\ge3$) & 6 & 10 & 16 \\
+\midrule
+runs generated & & 14 & 58 & 136 \\
+approximate time & & 1.5\,min & 4\,min & 10\,min \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Guidance: more magnitudes give the detector a wider view of fault severity;
+more repeats make the evaluation numbers less noisy; more normal runs give a
+better threshold and a more trustworthy false alarm rate. Duration must leave
+time after onset (25--60\% of the run) for ramped faults to develop.
+
+\subsection{Model parameters (Model tab)}
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}llX@{}}
+\toprule
+Parameter & Default & Effect \\
+\midrule
+methods & all four & which detectors to fit and compare \\
+\code{window} & 60 samples & longer windows see slower faults and smooth noise, at the cost of delay \\
+\code{stride} & 10 samples & spacing of windows; smaller means finer delay resolution and more data \\
+\code{quantile} & 0.995 & threshold quantile on calibration data; raise it (0.999) for fewer false alarms, lower it for faster detection \\
+\code{seed} & 0 & split and model randomness (Python only) \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Fault parameters (Faults tab)}
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Kind & Starting magnitude & Unit \\
+\midrule
+\code{leak} & $5\times10^{-5}$ & m$^2$ effective leak area \\
+\code{fouling} & 0.35 & fraction of flow area lost \\
+\code{pump_wear} & 0.18 & fraction of head lost \\
+\code{stiction} & 0.10 & deadband, fraction of stroke (slip default 0.04) \\
+\code{sensor_bias} & 25 & tag units \\
+\code{sensor_drift} & 1.5 & tag units per minute \\
+\code{sensor_stuck} & none & \\
+\code{sensor_noise} & 2.0 & $\sigma$ in tag units \\
+\bottomrule
+\end{tabular}
+\end{center}
+Sensor faults also take a tag (\tg{LT101}, \tg{LT102}, \tg{FT101},
+\tg{FT102}, \tg{PT101} or \tg{ZT101}) and every fault takes a ramp in
+seconds.
+
+\section{Command-line options}
+\label{sec:cli}
+
+\subsection{Workbench}
+\begin{lstlisting}[style=sh]
+python -m pyplant.workbench.app [--workspace ./work/demo] [--base-port 5400]
+                                [--host 127.0.0.1] [--port 8050] [--debug]
+\end{lstlisting}
+
+\subsection{Services}
+These are the processes the supervisor starts; the \ui{Runtime} tab shows the
+exact command line of each. They can be run by hand in four terminals.
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}p{62mm}lX@{}}
+\toprule
+Flag & Default & Meaning \\
+\midrule
+\multicolumn{3}{@{}l}{\code{python -m pyplant.services.plant}} \\
+\quad\code{--port} & 5020 & Modbus slave port \\
+\quad\code{--control-port} & 0 & fault injection HTTP API; 0 disables \\
+\quad\code{--dt} & 0.05 & integration step, s \\
+\quad\code{--speed} & 1.0 & real-time factor \\
+\quad\code{--start} & steady & \code{steady} or \code{empty} initial state \\
+\quad\code{--no-noise} & off & disable instrument noise \\
+\midrule
+\multicolumn{3}{@{}l}{\code{python -m pyplant.services.plc}} \\
+\quad\code{--plant-host}, \code{--plant-port} & 127.0.0.1, 5020 & where the plant is \\
+\quad\code{--port} & 5021 & PLC Modbus server port \\
+\quad\code{--opcua-port}, \code{--no-opcua} & 4840 & OPC UA server \\
+\quad\code{--period} & 0.10 & scan period, s \\
+\quad\code{--speed} & 1.0 & real-time factor \\
+\quad\code{--setpoint} & 300 & initial setpoint, mm \\
+\midrule
+\multicolumn{3}{@{}l}{\code{python -m pyplant.services.historian}} \\
+\quad\code{--endpoint} & & PLC OPC UA endpoint \\
+\quad\code{--db} & pyplant.duckdb & database file \\
+\quad\code{--publish-ms} & 200 & subscription publishing interval \\
+\quad\code{--flush} & 1.0 & buffer flush period, s \\
+\quad\code{--heartbeat} & 30 & maximum gap per tag, s \\
+\quad\code{--api-port} & 0 & query API port; 0 disables \\
+\midrule
+\multicolumn{3}{@{}l}{\code{python -m pyplant.services.hmi}} \\
+\quad\code{--endpoint} & & PLC OPC UA endpoint \\
+\quad\code{--history} & & historian URL, or a DuckDB path \\
+\quad\code{--port}, \code{--poll} & 8080, 0.5 & HTTP port, poll period (s) \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Training from the command line}
+\begin{lstlisting}[style=sh]
+python -m pyplant.ml.train --out artifacts --duration 3600 --magnitudes 3 \
+       --repeats 2 --normal-runs 6 --window 60 --stride 10 --quantile 0.995 \
+       --seed 0 [--reuse]
+\end{lstlisting}
+This fits PCA and the autoencoder; \code{--reuse} skips generation when
+\code{dataset.parquet} already exists in \code{--out}.
+
+\section{Code constants}
+
+Some parameters are design decisions and live in code. Change them with care
+and run \code{pytest} afterwards; the tests check most invariants.
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}llX@{}}
+\toprule
+Constant & File & Meaning \\
+\midrule
+\code{Params} fields & \code{core/hybrid_tank.py} & plant geometry, pump, valve, orifices (Table~\ref{tab:params}) \\
+\code{PidTuning} fields & \code{plc/pid.py} & $K_c$, $T_i$, $T_d$, $T_f$, limits, action \\
+alarm limits & \code{tags.py} & \code{limits} on each tag: HI 500, HIHI 550, LOLO 50\,mm; PT HIHI 58\,kPa; FT LO 1\,L/min \\
+deadbands & \code{plc/program.py} & 10\,mm, 2\,kPa, 0.5\,L/min \\
+\code{MIN_FLOW_DELAY} & \code{plc/program.py} & 15\,s low-flow trip delay \\
+\code{DEFAULT_NOISE} & \code{faults/scenarios.py} & instrument noise $\sigma$ per tag \\
+\code{NORMAL_MOVES} & \code{faults/scenarios.py} & setpoint programme of the scenarios \\
+\code{WINDOW}, \code{STRIDE} & \code{ml/features.py} & default window and stride \\
+\code{PERSISTENCE} & \code{ml/evaluate.py} & consecutive windows for a detection (3) \\
+\code{DEVELOPED_AFTER} & \code{ml/evaluate.py} & settling time before isolation is judged (300\,s) \\
+\code{DATA_PRESETS}, \code{PRESETS} & \code{workbench/app.py} & dataset and fault presets in the UI \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\section{Offline experiments with other parameters}
+\label{sec:offline}
+
+The fastest way to try a different plant or tuning is the offline harness: the
+same PLC program, the same physics, no network, about 1900 times real time.
+
+\begin{lstlisting}
+from pyplant.core.hybrid_tank import Inputs, Params
+from pyplant.plc.harness import OperatorPanel, PlcHarness, scheduled_setpoint
+from pyplant.plc.pid import PidTuning
+from pyplant.plc.program import Program
+from pyplant.runners.base import Simulation
+from pyplant.runners.fast import run
+
+plant  = Params(area_tank1=0.03)                 # a wider tank 1
+tuning = PidTuning(kc=0.6, ti=50.0)              # a more aggressive loop
+harness = PlcHarness(program=Program(ts=0.1, tuning=tuning),
+                     panel=OperatorPanel(setpoint=300.0))
+sim = Simulation.at_steady_state(Inputs(0.662, True), params=plant,
+                                 dt=0.05, control_period=0.1, policy=harness)
+sim.policy = scheduled_setpoint(harness, [(0.0, 300.0), (60.0, 350.0)])
+tr = run(sim, duration=600.0, log_period=1.0, extra=harness.tags)
+df = tr.to_dataframe()            # LT101, LIC101_OP, ... one row per second
+\end{lstlisting}
+
+To generate scenario data with a different plant, pass \code{params} to the
+scenario: \code{Scenario("wide", params=Params(area_tank1=0.03), ...)}. Note
+that \code{run_scenario()} always uses the default \code{PidTuning}.
+
+\subsection{Retuning after a plant change}
+If you change the plant, re-identify $K$ and $\tau$ from an open-loop step
+(Chapter~\ref{ch:tutorials}) and recompute the IMC settings:
+\[
+  K_c = \frac{\tau}{K\lambda}, \qquad T_i = \tau, \qquad
+  \lambda \approx \tau/5 .
+\]
+A larger tank area increases $\tau$ roughly in proportion; the gain $K$
+changes with the operating point because the valve and the drains are
+non-linear.

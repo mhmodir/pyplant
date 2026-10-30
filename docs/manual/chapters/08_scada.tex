@@ -1,0 +1,214 @@
+\chapter{SCADA: historian, HMI and alarms}
+\label{ch:scada}
+
+Supervisory control and data acquisition (SCADA) sits above the PLC. It does
+not close loops; it records, displays and lets people intervene. In pyplant
+the SCADA layer is three pieces: the historian collector, its query API and
+the operator HMI with an ISA-18.2 alarm manager.
+
+\section{The historian}
+
+\subsection{Data flow}
+
+\begin{figure}[htbp]
+\centering
+\scalebox{0.8}{%
+\begin{tikzpicture}[node distance=7mm and 8mm]
+  \node[hot] (opc) {PLC OPC UA\\server, 5403};
+  \node[box,right=of opc] (sub) {subscription\\publish 200\,ms};
+  \node[box,right=of sub] (buf) {buffer\\\code{_on_change}};
+  \node[box,right=of buf] (db) {DuckDB\\\code{samples}};
+  \node[box,below=of buf] (hb) {heartbeat loop\\re-store quiet tags\\every 30\,s};
+  \node[good,below=of db] (api) {query API\\port 5404};
+  \node[box,right=of api] (cli) {HMI trends,\\inference};
+  \draw[flow] (opc) -- (sub);
+  \draw[flow] (sub) -- node[lbl,above]{on change} (buf);
+  \draw[flow] (buf) -- node[lbl,above]{flush 1\,s} (db);
+  \draw[flow] (hb) -- (buf);
+  \draw[flow] (db) -- (api);
+  \draw[flow] (api) -- (cli);
+\end{tikzpicture}}
+\caption{The historian collector (\code{pyplant/services/historian.py}).}
+\label{fig:historian}
+\end{figure}
+
+The collector subscribes to every tag the PLC serves. An OPC UA subscription
+already pushes only on change, which is most of what a historian's
+compression does. What it does not give is an anchor for a tag that has been
+quiet for an hour, so each tag is also re-stored if it has been silent for
+\code{heartbeat} seconds (default 30). This is the classic exception-reporting
+pair: store on change, and never let the gap exceed a maximum. Writes are
+buffered and flushed in batches every second, because row-at-a-time inserts
+are the usual way to make DuckDB look slow.
+
+\subsection{Storage}
+The table is in long format, one row per sample:
+\begin{center}
+\code{samples(ts TIMESTAMP, tag VARCHAR, value DOUBLE, quality UTINYINT)}
+\end{center}
+A wide table needs a migration the day a tag is added; a long table does not.
+Quality is the OPC UA status flattened to \code{GOOD}~(0),
+\code{UNCERTAIN}~(1) and \code{BAD}~(2). Queries ignore bad samples unless
+asked.
+
+\subsection{Resampling: last value carried forward}
+
+Samples arrive by exception, so between two stored samples the signal did not
+drift; it was \emph{held}. Linear interpolation would invent a ramp that never
+existed, and on a valve position or an alarm bit that is simply wrong. The
+historian builds a regular grid and uses DuckDB's \code{ASOF LEFT JOIN} to
+take, for every grid instant, the last sample at or before it:
+\begin{equation}
+  \hat x(t_g) = x(t_j), \qquad j = \max\{\,i : t_i \le t_g\,\}.
+\end{equation}
+Samples stored before the window's start count too, so a window never opens
+with a column of nulls just because a tag happened to be quiet.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+\begin{axis}[width=0.6\textwidth,height=3.5cm,xlabel={time (s)},ylabel={value},
+  xmin=0,xmax=10,ymin=0,ymax=5,grid=major,grid style={linegrey},legend pos=north west]
+\addplot[only marks,mark=*,accent,mark size=2.5pt] coordinates {(0.4,1)(3.2,3)(6.7,2)(8.1,4)};
+\addplot[slate,thick,const plot] coordinates {(0.4,1)(3.2,1)(3.2,3)(6.7,3)(6.7,2)(8.1,2)(8.1,4)(10,4)};
+\addplot[badred,dashed] coordinates {(0.4,1)(3.2,3)(6.7,2)(8.1,4)};
+\legend{stored samples, LOCF (used), interpolation (wrong)}
+\end{axis}
+\end{tikzpicture}
+\caption{Step-hold resampling against linear interpolation.}
+\label{fig:locf}
+\end{figure}
+
+\subsection{Covered span}
+\code{span()} is the extent of the whole database, and a window opened there
+almost always starts with nulls: tags report a few milliseconds apart, so the
+earliest sample belongs to exactly one of them. \code{covered_span(tags)}
+returns the interval over which \emph{every} requested tag has a value, the
+latest of the per-tag first samples to the latest last sample. Use it to ask
+``give me everything you have''.
+
+\begin{warn}[Wall-clock timestamps]
+Timestamps are wall clock, as a real historian's are. At \code{speed} $>1$ the
+recorded timeline is compressed, so a window 60 wall seconds long covers
+$60\times\text{speed}$ seconds of plant time. Training data comes from the
+fast runner in plant time and never touches this database.
+\end{warn}
+
+\subsection{One writer}
+DuckDB takes an exclusive lock on its file, so a second process cannot open
+it even to read. That is not a limitation to work around: a historian is a
+service you query, not a file you share. Exactly one process writes, and
+everything else asks the query API on port 5404 (Chapter~\ref{ch:api}).
+
+\section{The operator HMI}
+
+The HMI (\code{pyplant/hmi/app.py}; port 5405 under the workbench, 8080
+when started by hand) is a FastAPI application
+serving one HTML page and a JSON API. It connects to the PLC over OPC UA,
+polls the faceplate every 0.5\,s, feeds the alarm manager and reads trends
+from the historian API. It shows a live mimic of the two tanks, the LIC101
+faceplate (SP, PV, OP, mode), pump control, trends and the alarm list.
+
+\subsection{Write guards}
+Every operator write goes through one function that rejects bad requests
+before anything reaches the control system:
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Check & HTTP status & Example \\
+\midrule
+tag exists & 404 & unknown tag \\
+tag is operator-writable & 403 & writing \tg{LT101} \\
+analog value inside span & 422 & setpoint of 900\,mm \\
+connected to the PLC & 503 & PLC is down \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Pulsed reset}
+\code{POST /api/reset} pulses \tg{CMD_ALM_RESET}. A latched interlock needs
+an \emph{edge}, not a level: holding the reset bit true would re-clear the
+latch on every scan and defeat it.
+
+\section{Alarm management (ISA-18.2)}
+
+A boolean that turns a row red is not alarm management. ANSI/ISA-18.2 exists
+because operators need to distinguish four situations that a single ``is it
+on'' flag collapses into two. pyplant implements the core state model in
+\code{pyplant/hmi/alarms.py}.
+
+\begin{figure}[htbp]
+\centering
+\scalebox{0.8}{%
+\begin{tikzpicture}[node distance=24mm and 44mm,
+  st/.style={box,minimum width=34mm,minimum height=12mm}]
+  \node[good,st] (n) {\textbf{NORMAL}\\inactive, acknowledged};
+  \node[bad,st,right=of n] (u) {\textbf{UNACK\_ALARM}\\active, unacknowledged};
+  \node[box,st,fill=warnamber!15,below=of u] (a) {\textbf{ACK\_ALARM}\\active, acknowledged};
+  \node[box,st,fill=warnamber!25,below=of n] (r) {\textbf{RTN\_UNACK}\\cleared, unacknowledged};
+  \node[box,st,fill=slate!15,above=12mm of $(n)!0.5!(u)$] (s) {\textbf{SHELVED}\\suppressed, expires};
+  \draw[flow] (n) -- node[lbl,above]{condition in} (u);
+  \draw[flow] (u) -- node[lbl,right]{acknowledge} (a);
+  \draw[flow] (r) -- node[lbl,left]{acknowledge} (n);
+  \draw[flow] ([xshift=-10mm]u.south) -- node[lbl,sloped,above=1pt,pos=0.35]{condition out} ([xshift=6mm]r.north);
+  \draw[flow] ([xshift=16mm]r.north) -- node[lbl,sloped,below=1pt,pos=0.65]{in again} ([xshift=0mm]u.south);
+  \draw[flow] (a.south) -- ++(0,-8mm) -| node[lbl,pos=0.25,below]{condition out} ([xshift=-8mm]r.west) |- (n.west);
+  \draw[dflow] (s.west) -| node[lbl,pos=0.75,left]{unshelve / expiry} (n.north);
+  \draw[dflow] (u.north) |- node[lbl,pos=0.25,right]{shelve} (s.east);
+\end{tikzpicture}}
+\caption{The ISA-18.2 alarm states implemented by \code{Alarm}. Shelving can be
+entered from any state and returns to whatever the condition says at that
+moment.}
+\label{fig:isa}
+\end{figure}
+
+\begin{description}
+  \item[NORMAL] quiet, and nobody needs to do anything.
+  \item[UNACK\_ALARM] active, and nobody has looked at it yet.
+  \item[ACK\_ALARM] active, and somebody has taken responsibility.
+  \item[RTN\_UNACK] it cleared itself before anyone looked. This is the
+        state that matters most: a transient between two operator glances
+        leaves no trace in a flag-based list, and the transient nobody saw is
+        often the interesting one. It stays on the list until acknowledged.
+  \item[SHELVED] a deliberate, temporary, expiring silence with a reason
+        recorded (default 30\,min, capped at 8\,h). The condition is still
+        tracked underneath: if it goes active while shelved, the alarm comes
+        back as unacknowledged on expiry.
+\end{description}
+
+\subsection{Priorities}
+Priority is a design decision per alarm, not something derived from a name.
+An interlock that trips the pump outranks a level approaching its limit.
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Alarm & Priority & Message \\
+\midrule
+\tg{ILK_PMP101} & CRITICAL (4) & interlock tripped, pump stopped, valve shut \\
+\tg{ALM_LT101_LOLO} & HIGH (3) & tank 1 level low low \\
+\tg{ALM_PT101_HIHI} & HIGH (3) & pump discharge pressure high high \\
+\tg{ALM_LT101_HI} & MEDIUM (2) & tank 1 level high \\
+\tg{ALM_HEALTH} & LOW (1) & model health index degraded \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The alarm page sorts by priority, then newest first. The summary reports the
+counts per state, the number needing attention (UNACK plus RTN\_UNACK) and
+the worst priority among them, which drives the banner colour.
+
+\subsection{Operating the alarm list}
+\begin{enumerate}
+  \item A red row is an unacknowledged active alarm. Investigate, then press
+        \ui{Ack}; it turns amber (acknowledged) and stays until the condition
+        clears.
+  \item A row marked \emph{returned} cleared on its own. Read it and
+        acknowledge it; it then leaves the list.
+  \item A chattering nuisance alarm can be shelved with a reason and a
+        duration. Shelving is how you avoid operators ignoring the whole
+        list instead.
+  \item The interlock additionally needs \ui{Reset} once the cause is gone;
+        acknowledging only clears the notification, not the trip.
+\end{enumerate}

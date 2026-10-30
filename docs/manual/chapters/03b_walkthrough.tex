@@ -1,0 +1,493 @@
+\chapter{Walkthrough: one leak, from step 0 to a trained detector}
+\label{ch:walkthrough}
+
+This chapter follows a single, fixed scenario through every part of the
+workbench. Every figure is a real screenshot taken while writing this manual,
+in the order the steps happen, and each one is followed by a table that names
+the elements on screen and says what they do. Section~\ref{sec:wt-numbers}
+collects the numbers to expect at each step.
+
+\begin{note}[The scenario]
+Unit~1 runs in automatic at a level of 300\,mm. The operator raises the
+setpoint to 340\,mm. Then a hole opens in tank~1 (the \ui{Leak in tank 1}
+preset, an effective leak area of $5\times10^{-5}$\,m$^2$). We watch the
+controller hide the leak, then confirm it on the operator HMI. Finally we
+generate a labelled dataset and train four detectors to see which one would
+have caught it. Workspace \code{work/manual}, base port 5400, speed
+1$\times$ real time.
+\end{note}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=3mm and 4mm,
+  st/.style={box,minimum width=24mm,minimum height=7mm,font=\scriptsize,inner sep=2pt}]
+  \node[term,font=\scriptsize\bfseries] (s0) {0 open};
+  \node[st,right=of s0] (s1) {1 default scenario};
+  \node[st,right=of s1] (s2) {2--4 start stack,\\read mimic};
+  \node[st,right=of s2] (s5) {5 setpoint\\300$\to$340};
+  \node[bad,st,below=of s5] (s7) {6--8 inject leak,\\ground truth};
+  \node[st,left=of s7] (s9) {9--10 Runtime\\and HMI};
+  \node[st,left=of s9] (s11) {11--13 clear,\\generate data};
+  \node[good,st,left=of s11] (s14) {14--16 train,\\compare};
+  \node[term,font=\scriptsize\bfseries,below=of s14] (s17) {17 stop};
+  \draw[flow] (s0) -- (s1);
+  \draw[flow] (s1) -- (s2);
+  \draw[flow] (s2) -- (s5);
+  \draw[flow] (s5) -- (s7);
+  \draw[flow] (s7) -- (s9);
+  \draw[flow] (s9) -- (s11);
+  \draw[flow] (s11) -- (s14);
+  \draw[flow] (s14) -- (s17);
+\end{tikzpicture}
+\caption{The eighteen steps of the walkthrough.}
+\label{fig:wt-map}
+\end{figure}
+
+% ---------------------------------------------------------------------------
+\section{Step 0: open the workbench}
+
+Start the workbench on its own workspace so the walkthrough does not disturb
+other work:
+\begin{lstlisting}[style=sh]
+conda activate pyplant
+python -m pyplant.workbench.app --workspace ./work/manual
+\end{lstlisting}
+Open \url{http://127.0.0.1:8050}. The Quick start tab opens first
+(Figure~\ref{fig:s00_open}).
+
+\shot{s00_open}{Step 0: the workbench as it opens, with nothing running.}
+
+\begin{elements}
+pyplant workbench & Title. The dark header stays on screen on every tab. \\
+manual (badge) & Name of the workspace folder. Every file the session
+  writes goes there. \\
+0/4 services (badge) & How many of the four services (plant, PLC, historian,
+  HMI) are up. It is red below 4/4 and green at 4/4. \\
+alarms -- / faults -- & Live alarm and fault counts. They show ``--'' while
+  the stack is down, because nobody is there to ask. \\
+Speed & Plant-time multiplier for the live stack (1$\times$ to
+  20$\times$). It takes effect at the next \ui{Start stack}; see
+  Section~\ref{sec:speed}. \\
+Start stack & Green button. Launches the four services as separate
+  processes. \\
+Stop & Stops every service the workbench started. \\
+Open HMI & Link that opens the operator page on port 5405 in a new tab. \\
+Tabs & \ui{Quick start}, \ui{Runtime}, \ui{Faults}, \ui{Data},
+  \ui{Model}. The active tab is white with a blue top edge. \\
+Workflow cards 1--5 & The recommended order of work. Card~1 is highlighted
+  green because it needs no services. The \ui{Go to \ldots} buttons switch
+  tabs. \\
+\end{elements}
+
+% ---------------------------------------------------------------------------
+\section{Step 1: run the default scenario offline}
+
+Scroll down to \ui{Default scenario}. Leave \ui{Scenario} on
+\ui{Leak in tank 1 (default)}, \ui{Length} on \ui{30 minutes}, and
+\ui{setpoint moves} unticked, then press \ui{Run scenario}. The fast runner
+simulates 30 minutes of plant time in a few seconds, without any service.
+
+\shot{s01_scenario}{Step 1: the default scenario result.}
+
+\begin{elements}
+Scenario (dropdown) & Which built-in scenario to run. The default is the
+  tank-1 leak. \\
+Length (dropdown) & Plant time to simulate. \\
+setpoint moves & When ticked, the scenario also steps the setpoint, so the
+  fault has to be told apart from normal operation. \\
+Run scenario & Blue button. Runs the scenario and redraws everything
+  below it. \\
+LT101 CHANGE & End level minus start level: \textbf{+0.02\,mm}. The loop
+  holds the level, so the leak is \emph{invisible} in the level. \\
+CONTROLLER OP CHANGE & \textbf{+9.64\,\%}. The controller opens the valve to
+  feed the leak. This is where the fault actually shows. \\
+LT102 / FT101 CHANGE & Tank~2 is unaffected (\textbf{$-$0.01\,mm}); the
+  inflow rises by \textbf{2.91\,L/min}, which equals the leak flow. \\
+PUMP TRIP & Whether the low-level interlock tripped (\textbf{none}). \\
+FAULT ONSET & Plant time at which the leak opened (\textbf{720\,s}). \\
+Chart & Left axis: levels (\tg{LT101} blue, \tg{LT102} purple, setpoint
+  grey dashes). Right axis: \tg{LIC101_OP} orange and \tg{ZT101} green
+  (\%). The red band marks the fault. \\
+Caption line & Green text naming the scenario and length that produced the
+  chart. \\
+\end{elements}
+
+The chart is the whole lesson of the chapter in one picture. At onset the
+level dips about 20\,mm and recovers within a few minutes. The valve then
+stays about 10 points more open for as long as the leak lasts.
+
+% ---------------------------------------------------------------------------
+\section{Step 2: look at the Runtime tab before starting}
+
+Click the \ui{Runtime} tab. With nothing running, every service is down
+and the mimic shows dashes (Figure~\ref{fig:s02_runtime_stopped}).
+
+\shot{s02_runtime_stopped}{Step 2: the Runtime tab with the stack down.}
+
+\begin{elements}
+SERVICES table & One row per service: name, \ui{STATE} pill (red
+  \ui{down} / green \ui{up}), operating-system \ui{PID}, \ui{PORT} and
+  \ui{ROLE}. \\
+Hint line & ``Not running. Start the stack to see live values.'' \\
+UNIT 1 mimic & The process drawing. Values are ``--'' until the PLC
+  answers. \\
+\end{elements}
+
+% ---------------------------------------------------------------------------
+\section{Step 3: start the stack}
+
+Keep \ui{Speed} at \ui{1x real time} and press \ui{Start stack}. After a
+few seconds the badge turns green at \ui{4/4 services}, and the alarm and
+fault counts change from ``--'' to 0.
+
+\shot{s03_runtime_services}{Step 3: all four services up.}
+
+\begin{elements}
+stack started at 1x & Green confirmation under the header. \\
+STATE = up & Each process answered its health check. \\
+PID & Process id; useful if you need to look at a service in Task
+  Manager. \\
+PORT & plant 5400 (Modbus), plc 5402 (Modbus server; OPC UA on 5403),
+  historian 5404, hmi 5405. \\
+Command line (grey text) & The exact command the supervisor ran for the
+  last service listed. Copy it to run that service by hand. \\
+\end{elements}
+
+% ---------------------------------------------------------------------------
+\section{Step 4: read the mimic}
+
+Scroll to \ui{UNIT 1}. This is the healthy reference picture; keep it in
+mind for step~9.
+
+\shot{s04_runtime_mimic}{Step 4: the healthy plant at steady state.}
+
+\begin{elements}
+PMP101 & Pump symbol. A green ring means running. \\
+FCV101 66.1\% & Control valve. The fill of the small box is the stem
+  position. \\
+PT101 / FT101 labels & Pump discharge pressure (50.3\,kPa) and inflow
+  (10.08\,L/min), drawn on the pipe. \\
+TANK 1 / TANK 2 & Live levels \tg{LT101} = 300.0\,mm and \tg{LT102} =
+  176.8\,mm. The blue fill is to scale. \\
+drain 10.05 L/min & Outflow of tank~2 (\tg{FT102}). In steady state it
+  equals \tg{FT101}. \\
+Tiles FT101 \ldots ZT101 & The same measurements as numbers. \\
+SCAN / OVERRUNS & PLC scan time (3.70\,ms of a 100\,ms budget) and the count
+  of scans that ran over. A non-zero OVERRUNS means the PC is too slow for
+  the chosen speed. \\
+\end{elements}
+
+% ---------------------------------------------------------------------------
+\section{Step 5: operate LIC101, a setpoint step}
+
+On the \ui{LIC101} faceplate, type \code{340} in \ui{Setpoint} and press its
+\ui{Write} button. Watch the trend for about two minutes.
+
+\shot{s05_faceplate_trend}{Step 5: the faceplate after the setpoint step to 340\,mm, with the trend.}
+
+\begin{elements}
+PV / SP / OP / ERROR & Process value 339.7\,mm, setpoint 340.0\,mm,
+  controller output 68.6\,\%, error 0.3\,mm. \\
+MODE / PUMP & AUTO (the PID drives the valve) and RUN. \\
+Setpoint + Write & Sends a new setpoint to the PLC. ``sp-write accepted''
+  confirms it. \\
+Manual OP + Write & Valve opening to use in Manual mode. Ignored in Auto. \\
+Auto / Manual & Switches the controller mode. The PLC changes mode
+  bumplessly. \\
+Pump Start / Stop & Operator commands to PMP101. \\
+Reset interlock & Clears a latched low-level trip once the level has
+  recovered. \\
+TREND, Window & Historian trend, 5 minutes by default. Levels on the left
+  axis, OP on the right axis. \\
+\end{elements}
+
+The step response is clean. The output kicks up to about 80\,\%, the level
+rises to 340\,mm in roughly a minute without overshoot, and the output
+settles at 68.6\,\%, a little higher than before because a fuller tank~1
+drains faster.
+
+% ---------------------------------------------------------------------------
+\section{Step 6: open the Faults tab}
+
+Click the \ui{Faults} tab. Before anything is injected, \ui{Active faults}
+reads ``Plant is healthy.''
+
+\shot{s06_faults_empty}{Step 6: the Faults tab, nothing injected.}
+
+\begin{elements}
+BREAK SOMETHING & One-click presets (red outline). Each injects a fault of
+  a sensible size: \ui{Leak in tank 1}, \ui{Slow leak (15 min ramp)},
+  \ui{Sticking valve}, \ui{Worn pump}, \ui{Fouled interconnect},
+  \ui{LT101 reads 25 mm high}, \ui{LT101 frozen}. \\
+Clear all faults & Removes every active fault at once. \\
+OR BUILD ONE: Kind & Fault type, alphabetical: \code{fouling}, \code{leak},
+  \code{pump_wear}, \code{sensor_bias}, \code{sensor_drift},
+  \code{sensor_noise}, \code{sensor_stuck}, \code{stiction}. \\
+Magnitude ($-$/$+$) & Size of the fault. The text on the right gives its
+  unit for the chosen kind (here m$^2$ of effective leak area). \\
+Sensor & Which transmitter a sensor fault acts on. It is greyed out for
+  process faults. \\
+Ramp (s) & 0 for a step; otherwise the time the fault takes to grow to
+  full size. \\
+Inject & Applies the custom fault. \\
+Grey note & Injection is separate from control: neither the HMI nor a
+  model is told about the fault. \\
+\end{elements}
+
+% ---------------------------------------------------------------------------
+\section{Step 7: inject the leak}
+
+Press \ui{Leak in tank 1}. The message under the presets confirms the
+injection and the header badge turns red at \ui{faults 1}.
+
+\shot{s07_fault_injected}{Step 7: the leak is injected.}
+
+\begin{elements}
+faults 1 (red badge) & One fault is active in the plant. \\
+Message & ``injected leak\_168 on TANK1 -- watch the Runtime tab''. The
+  number is the plant time of injection, used as the fault id. \\
+ACTIVE FAULTS row & \ui{ID} leak\_168, \ui{KIND} leak, \ui{TARGET} TANK1,
+  \ui{STATE} active, \ui{MAGNITUDE} 0.000050, \ui{START (S)} 169,
+  \ui{RAMP (S)} 0. \\
+\end{elements}
+
+% ---------------------------------------------------------------------------
+\section{Step 8: check the ground truth}
+
+Scroll down. The ground-truth table compares the plant's true state with
+what each transmitter reports.
+
+\shot{s08_truth}{Step 8: active fault and ground truth, about 30\,s after injection.}
+
+\begin{elements}
+TAG & The five measured channels. \\
+TRUE & The physical value inside the simulator. \\
+REPORTED & What the transmitter sends to the PLC, including noise and any
+  sensor fault. \\
+DIFFERENCE & Reported minus true. Here every difference is within the noise
+  (below 0.3), which tells you the fault is in the \emph{process}, not in a
+  sensor. Under \ui{LT101 reads 25 mm high} the LT101 row would show about
+  +25. \\
+\end{elements}
+
+Notice the true level, 299.3\,mm: the leak has already pulled tank~1 about
+40\,mm below the 340\,mm setpoint.
+
+% ---------------------------------------------------------------------------
+\section{Step 9: watch the controller compensate}
+
+Go back to \ui{Runtime} and scroll to \ui{LIC101}, about two minutes after
+the injection.
+
+\shot{s09_runtime_leak}{Step 9: the loop fighting the leak. The trend shows the setpoint step from step~5, then the leak.}
+
+\begin{elements}
+PV 324.6 mm, ERROR 15.4 mm & The level is still below setpoint but
+  climbing back. \\
+OP 93.4\,\% & The valve is almost fully open. Before the leak it was
+  68.6\,\%. \\
+MODE AUTO, PUMP RUN & No interlock trip; the operator sees no alarm. \\
+Trend, first edge & The setpoint step from step~5 (grey) and the clean level
+  response (blue). \\
+Trend, second edge & The leak. The level (blue) drops to about 290\,mm while
+  the output (orange) jumps to about 92\,\% and stays there. The level
+  recovers slowly, because the valve has little travel left. \\
+\end{elements}
+
+This is the signature to remember: a \emph{process} fault moves the
+controller output, while the level only dips and then returns.
+
+% ---------------------------------------------------------------------------
+\section{Step 10: see it as the operator, on the HMI}
+
+Click \ui{Open HMI} in the header, or open \url{http://127.0.0.1:5405}. The
+HMI is a separate service and reads everything over OPC UA.
+
+\shot{s10_hmi}{Step 10: the operator HMI during the leak.}
+
+\begin{elements}
+pyplant -- Unit 1 & HMI header. \ui{connected} (green) means the OPC UA
+  session is live. It also shows the alarm count, the controller mode badge
+  \ui{AUTO}, and the PLC timestamp. \\
+MIMIC & Same process picture, in a dark ISA-101 style: tank~1 328.4\,mm,
+  tank~2 188.4\,mm. \\
+FT101 / PT101 / ZT101 & Inflow up to 18.30\,L/min (from about 10), pump
+  pressure down to 27.9\,kPa (the pump runs further out on its curve), valve
+  at 93.4\,\%. \\
+Scan & PLC scan time, 5.9\,ms. \\
+LIC101 panel & Same faceplate as the workbench: PV, SP, OP, Error, plus
+  \ui{Setpoint}/\ui{Manual OP} with \ui{Write}, \ui{Auto}/\ui{Manual} and
+  pump \ui{Start}/\ui{Stop}/\ui{Reset}. \\
+TREND, Window & 2\,min to 1\,hour. The legend notes that OP uses the
+  0--100 right-hand scale. \\
+ALARMS, Acknowledge all & Further down the page (not in the screenshot).
+  It stays empty in this scenario: no limit is crossed. \\
+\end{elements}
+
+\begin{warn}[Why no alarm?]
+The level never crossed the low alarm, so a conventional alarm system says
+nothing. A 5$\times10^{-5}$\,m$^2$ leak loses about 8\,L/min, nearly as much
+as the normal throughput, and the only evidence is a valve that is 25 points
+more open. Catching this is the job of the detectors trained in steps 14--16.
+\end{warn}
+
+% ---------------------------------------------------------------------------
+\section{Step 11: clear the fault and open the Data tab}
+
+Return to the workbench. On \ui{Faults} press \ui{Clear all faults}; the
+header goes back to \ui{faults 0}. Then click the \ui{Data} tab.
+
+\shot{s11_data_form}{Step 11: the Data tab with its default settings.}
+
+\begin{elements}
+Preset: Quick / Standard / Thorough & Fill the four fields below with a
+  ready-made size: about 1.5, 4 or 10 minutes of computing. \\
+Run length ($-$/$+$) & Plant seconds per simulated run (default 3600). \\
+Magnitudes & How many fault sizes per fault mode. \\
+Repeats & How many random onsets per size. \\
+Normal runs & Fault-free runs. Training uses only these. \\
+Generate / Cancel & Start or stop the background job. \\
+Progress bar & Grey bar under the buttons. It fills blue as runs
+  finish. \\
+RECENT RUNS & Job history: \ui{KIND}, \ui{STATUS}, \ui{TOOK} and a
+  \ui{RESULT} summary. The ``fault'' row is the \ui{Clear all faults}
+  action. \\
+\end{elements}
+
+% ---------------------------------------------------------------------------
+\section{Step 12: generate a Quick dataset}
+
+Press \ui{Quick (\textasciitilde1.5 min)}. The fields change to run length
+1200, magnitudes 1, repeats 1, normal runs 6. Press \ui{Generate}.
+
+\shot{s12_data_running}{Step 12: dataset generation in progress.}
+
+\begin{elements}
+started & Green confirmation under the bar. \\
+Progress bar & About a third full: runs completed out of runs planned. \\
+dataset / running / 17 s & The new job, still running, with elapsed time. \\
+\end{elements}
+
+The live stack keeps running meanwhile. Dataset runs use the offline fast
+runner in a separate process and do not touch the live plant.
+
+% ---------------------------------------------------------------------------
+\section{Step 13: the dataset is ready}
+
+\shot{s13_data_done}{Step 13: dataset finished.}
+
+\begin{elements}
+Full bar & The job has finished. \\
+dataset / ok / 43 s & Status and wall time. \\
+RESULT & \code{{"runs": 14, "samples": 16814, "path": ...}}: 6 normal plus
+  8 faulty runs, written to \code{work/manual/dataset.parquet} (1.7\,MB). \\
+\end{elements}
+
+% ---------------------------------------------------------------------------
+\section{Step 14: set up training}
+
+Click the \ui{Model} tab.
+
+\shot{s14_model_form}{Step 14: the Model tab before training.}
+
+\begin{elements}
+Methods (checklist) & The four detectors, from simplest to most complex:
+  Z-score limits, PCA/MSPC, Isolation forest, Autoencoder. Untick any you do
+  not want to train. \\
+Window & Samples per feature window (60). \\
+Stride & Step between windows (10). \\
+Quantile & The alarm threshold is this quantile of the scores on normal
+  data (0.995). Higher means fewer false alarms but later detection. \\
+Train & Starts the training job. \\
+RESULTS / BY FAULT MODE & Empty until the first model is trained
+  (``no model trained yet''). \\
+\end{elements}
+
+% ---------------------------------------------------------------------------
+\section{Step 15: train and read the results}
+
+Keep the defaults and press \ui{Train}. The message reads
+``started: zscore, pca, isolation\_forest, autoencoder''. On the Quick
+dataset the job takes about 12\,s, and the bar fills when it is done.
+
+\shot{s15_model_results}{Step 15: four detectors compared.}
+
+\begin{elements}
+model & Method name. The deployed one is marked \ui{(selected)}. \\
+detected & Share of faulty test runs flagged after onset: z-score 62\,\%,
+  PCA 88\,\%, isolation forest 38\,\%, autoencoder 88\,\%. \\
+median delay & Time from onset to first alarm (43\,s for PCA and the
+  autoencoder; more than 340\,s for the others). \\
+false alarms/day & Alarms on normal test runs, scaled to a day: 0.00 for
+  all four. \\
+flagged windows & Share of normal windows over the threshold (0.87\,\%). \\
+isolation & How often the top-scoring channel was the expected one. \\
+\end{elements}
+
+PCA and the autoencoder tie on detection and false alarms, so the rule in
+the grey note picks the \emph{simpler} method: PCA is deployed to
+\code{artifacts/detector.joblib}.
+
+% ---------------------------------------------------------------------------
+\section{Step 16: check the leak, fault mode by fault mode}
+
+Scroll to \ui{BY FAULT MODE}. It shows the selected detector's results for
+each fault mode.
+
+\shot{s16_by_mode}{Step 16: per-fault-mode breakdown of the selected detector.}
+
+\begin{elements}
+fault / runs & Fault mode and how many test runs it had. \\
+detected / median delay & The \textbf{leak} row: 2 runs, 100\,\%
+  detected, median 139\,s after onset. \\
+top channel & Channel with the largest contribution at the first alarm.
+  For the leak it is \tg{FLOW_IMBALANCE}, the inflow-minus-outflow residual. \\
+expected & Channel physics says should respond. The leak's matches, so the
+  detector also \emph{isolates} it correctly. ``not scored'' rows are
+  sensor faults, where isolation is not meaningful. \\
+\end{elements}
+
+% ---------------------------------------------------------------------------
+\section{Step 17: stop the stack}
+
+Press \ui{Stop} in the header. The badge returns to \ui{0/4 services}, the
+message reads ``stack stopped'', and every service shows \ui{down}.
+
+\shot{s17_stopped}{Step 17 (final): the stack stopped.}
+
+\begin{elements}
+stack stopped & Confirmation. \\
+0/4 services, alarms --, faults -- & Nothing is running any more. \\
+Mimic ``-- mm'' & No live values without the PLC. \\
+\end{elements}
+
+Everything from the session stays in \code{work/manual}: \code{config.json}
+(the settings used), \code{history.duckdb} (the historian),
+\code{dataset.parquet}, \code{artifacts/} (all four detectors, the deployed
+\code{detector.joblib}, \code{metrics.json} and per-run CSVs), and
+\code{jobs/} (job records and service logs).
+
+% ---------------------------------------------------------------------------
+\section{Numbers to expect}
+\label{sec:wt-numbers}
+
+\begin{table}[H]
+\centering\small
+\begin{tabularx}{\linewidth}{@{}lXl@{}}
+\toprule
+Step & Quantity & Observed \\
+\midrule
+1 & OP change for the default leak (offline) & +9.6\,\% \\
+4 & Healthy steady state at SP 300 & LT101 300.0, OP 66\,\%, FT101 10.1 \\
+5 & After SP step to 340 & PV 339.7, OP 68.6\,\%, no overshoot \\
+9 & Two minutes into the leak & PV 324.6, OP 93.4\,\%, no alarm \\
+10 & HMI during the leak & FT101 18.3\,L/min, PT101 27.9\,kPa \\
+13 & Quick dataset & 14 runs, 16\,814 samples, 43\,s \\
+15 & Selected detector & PCA, 88\,\% detected, 0 false alarms/day \\
+16 & Leak, per mode & 100\,\% detected, 139\,s, \tg{FLOW_IMBALANCE} \\
+\bottomrule
+\end{tabularx}
+\caption{Reference values from this walkthrough. Expect small run-to-run
+differences from noise and random fault onsets.}
+\label{tab:wt-numbers}
+\end{table}

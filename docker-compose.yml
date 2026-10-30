@@ -1,0 +1,86 @@
+# Two ways to run pyplant.
+#
+# 1. The workbench (default). One container, one port. The GUI starts and
+#    supervises the plant, PLC, historian and HMI itself.
+#
+#      docker compose up --build
+#      open http://localhost:8050
+#
+# 2. The services profile. The four services as separate containers on their
+#    own network, the way they would sit in a plant: field device, controller,
+#    historian and operator station. No workbench; the HMI is the interface.
+#
+#      docker compose --profile services up --build plant plc historian hmi
+#      open http://localhost:8080          operator HMI
+#      open http://localhost:8000/docs     fault injection API
+#
+# Both use the same image.
+
+x-image: &image
+  build: .
+  image: pyplant:latest
+
+services:
+  workbench:
+    <<: *image
+    container_name: pyplant-workbench
+    ports:
+      - "8050:8050"
+    volumes:
+      - workbench-data:/data
+    restart: unless-stopped
+
+  plant:
+    <<: *image
+    profiles: ["services"]
+    command: >
+      python -m pyplant.services.plant
+      --host 0.0.0.0 --port 5020 --control-port 8000
+    ports:
+      - "8000:8000"          # fault injection API; Modbus stays internal
+    restart: unless-stopped
+
+  plc:
+    <<: *image
+    profiles: ["services"]
+    # The PLC polls the plant over Modbus at startup. If the plant is not
+    # listening yet it exits, and the restart policy brings it back: the same
+    # thing a real controller does when its field device is late.
+    command: >
+      python -m pyplant.services.plc
+      --plant-host plant --plant-port 5020
+      --host 0.0.0.0 --port 5021 --opcua-port 4840
+    ports:
+      - "4840:4840"          # OPC UA, for any external client such as UaExpert
+    depends_on: [plant]
+    restart: unless-stopped
+
+  historian:
+    <<: *image
+    profiles: ["services"]
+    command: >
+      python -m pyplant.services.historian
+      --endpoint opc.tcp://plc:4840/pyplant/
+      --db /data/history.duckdb
+      --host 0.0.0.0 --api-port 8010
+    volumes:
+      - history-data:/data
+    depends_on: [plc]
+    restart: unless-stopped
+
+  hmi:
+    <<: *image
+    profiles: ["services"]
+    command: >
+      python -m pyplant.services.hmi
+      --endpoint opc.tcp://plc:4840/pyplant/
+      --history http://historian:8010
+      --host 0.0.0.0 --port 8080
+    ports:
+      - "8080:8080"
+    depends_on: [historian]
+    restart: unless-stopped
+
+volumes:
+  workbench-data:
+  history-data:

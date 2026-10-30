@@ -1,0 +1,138 @@
+\chapter{Reference}
+
+\section{Tag list}
+\label{app:tags}
+
+HR = holding register, C = coil. Scale is the integer factor on the wire.
+
+{\small\setlength{\tabcolsep}{4pt}
+\begin{longtable}{@{}llllllll@{}}
+\toprule
+Tag & Description & Owner & Table & Addr & Unit & Span & Scale \\
+\midrule
+\endhead
+\multicolumn{8}{@{}l}{\textit{Plant measurements (block \code{PLANT_MEAS}, \code{PLANT_STATUS})}} \\
+\tg{LT101} & tank 1 level & PLANT & HR & 0 & mm & 0--600 & 10 \\
+\tg{LT102} & tank 2 level & PLANT & HR & 1 & mm & 0--600 & 10 \\
+\tg{FT101} & pump discharge flow & PLANT & HR & 2 & L/min & 0--20 & 100 \\
+\tg{FT102} & tank 2 outlet flow & PLANT & HR & 3 & L/min & 0--20 & 100 \\
+\tg{PT101} & pump discharge pressure & PLANT & HR & 4 & kPa & 0--100 & 100 \\
+\tg{ZT101} & valve stem position & PLANT & HR & 5 & \% & 0--100 & 100 \\
+\tg{PMP101_RUN} & pump running & PLANT & C & 0 & & & \\
+\multicolumn{8}{@{}l}{\textit{Actuator commands (\code{PLC_CMD}, \code{PLC_CMD_BITS})}} \\
+\tg{FCV101_OP} & valve command & PLC & HR & 10 & \% & 0--100 & 100 \\
+\tg{PMP101_CMD} & pump start command & PLC & C & 10 & & & \\
+\multicolumn{8}{@{}l}{\textit{Operator (\code{OPER_SP}, \code{OPER_CMD}); writable}} \\
+\tg{LIC101_SP} & setpoint & OPER & HR & 20 & mm & 0--600 & 10 \\
+\tg{LIC101_MAN_OP} & manual output demand & OPER & HR & 21 & \% & 0--100 & 100 \\
+\tg{LIC101_AUTO} & loop in automatic & OPER & C & 11 & & & \\
+\tg{CMD_ALM_RESET} & alarm and interlock reset & OPER & C & 12 & & & \\
+\tg{CMD_PMP101_START} & pump start request & OPER & C & 13 & & & \\
+\multicolumn{8}{@{}l}{\textit{Faceplate readback (\code{PLC_FACE})}} \\
+\tg{LIC101_PV} & process value & PLC & HR & 22 & mm & 0--600 & 10 \\
+\tg{LIC101_OP} & controller output & PLC & HR & 23 & \% & 0--100 & 100 \\
+\tg{LIC101_ERR} & control error & PLC & HR & 24 & mm & $\pm$600 & 10 \\
+\multicolumn{8}{@{}l}{\textit{Diagnostics (\code{PLC_DIAG})}} \\
+\tg{SCAN_MS} & scan time & PLC & HR & 30 & ms & 0--1000 & 10 \\
+\tg{SCAN_OVERRUNS} & overrun count & PLC & HR & 31 & count & 0--30000 & 1 \\
+\tg{PLC_HEARTBEAT} & heartbeat counter & PLC & HR & 32 & count & 0--30000 & 1 \\
+\multicolumn{8}{@{}l}{\textit{Alarms and interlocks (\code{PLC_ALARMS})}} \\
+\tg{ALM_LT101_HI} & tank 1 level high & PLC & C & 20 & & & \\
+\tg{ALM_LT101_LOLO} & tank 1 level low low & PLC & C & 21 & & & \\
+\tg{ALM_PT101_HIHI} & pressure high high & PLC & C & 22 & & & \\
+\tg{ILK_PMP101} & pump interlock latched & PLC & C & 23 & & & \\
+\multicolumn{8}{@{}l}{\textit{Inference results (\code{ML_RESULT}, \code{ML_ALARMS}); reserved}} \\
+\tg{HEALTH_INDEX} & model health index & ML & HR & 40 & \% & 0--100 & 100 \\
+\tg{TOP_CONTRIB} & top contributing tag & ML & HR & 41 & enum & 0--64 & 1 \\
+\tg{ML_HEARTBEAT} & inference heartbeat & ML & HR & 42 & count & 0--30000 & 1 \\
+\tg{ALM_HEALTH} & health index degraded & ML & C & 30 & & & \\
+\bottomrule
+\end{longtable}
+}
+
+Print the live list and block plan with \code{python -m pyplant.tags}.
+
+\section{File layout}
+
+\begin{lstlisting}[style=sh]
+pyplant/
+  tags.py                 tag registry, codec, block plan
+  clock.py                drift-free Ticker
+  core/hybrid_tank.py     plant physics (pure functions, SI units)
+  runners/base.py         Simulation stepper, zero-order hold, policies
+  runners/fast.py         non-real-time driver, Trajectory, settle
+  runners/realtime.py     real-time plant task
+  plc/pid.py              velocity-form PID
+  plc/program.py          image tables, alarms, interlocks, timers
+  plc/harness.py          in-process PLC wiring for datasets and experiments
+  plc/scan.py             scan engine, IOLink, diagnostics
+  net/store.py, link.py   Modbus datastore, TagServer, TagClient
+  net/opcua.py            OPC UA address space, server view, client
+  services/plant.py       plant node (Modbus slave + fault API)
+  services/plc.py         soft PLC node (Modbus client/server + OPC UA)
+  services/historian.py   OPC UA collector + query API
+  services/hmi.py         HMI process
+  hist/db.py              DuckDB store, LOCF windows
+  hmi/alarms.py           ISA-18.2 alarm state machine
+  hmi/app.py, page.html   HMI API and operator page
+  faults/model.py         fault objects, FaultSet, FAULT_KINDS
+  faults/scenarios.py     scenario library, grid, run_scenario
+  ml/features.py          windows, statistics, derived channels
+  ml/dataset.py           generation, Parquet, scenario-level split
+  ml/detector.py          z-score, PCA, isolation forest, autoencoder
+  ml/evaluate.py          false alarms, delay, isolation
+  ml/train.py             command-line training pipeline
+  workbench/app.py        Dash workbench
+  workbench/workspace.py  configuration, run log, paths
+  workbench/supervisor.py start and stop the services
+  workbench/jobs.py       background jobs
+  workbench/tasks.py      dataset, training and quick-start tasks
+  workbench/clients.py    HTTP clients for the services
+tests/                    pytest suite
+manual/                   this manual
+\end{lstlisting}
+
+\section{Glossary}
+
+\begin{description}[itemsep=1pt]
+  \item[Anti-windup] Preventing the integral term from accumulating while
+        the actuator is saturated.
+  \item[ASOF join] A join that matches each row to the latest row of another
+        table at or before its time; used for LOCF resampling.
+  \item[Autoencoder] A neural network trained to reproduce its input through
+        a narrow bottleneck.
+  \item[Bumpless transfer] Switching between manual and auto without a jump
+        in controller output.
+  \item[Contribution] A channel's share of a window's anomaly score.
+  \item[EURange] OPC UA property giving a variable's engineering range.
+  \item[FAR] False alarm rate, here persistent alarms per day on normal
+        data.
+  \item[Health index] Anomaly score mapped to 0--100 with the threshold at
+        50.
+  \item[HMI] Human--machine interface, the operator's screen.
+  \item[Hysteresis] Different set and clear thresholds to stop chattering.
+  \item[IMC] Internal model control, a model-based tuning method.
+  \item[Image table] A PLC's snapshot of inputs or outputs for one scan.
+  \item[Interlock] Protective logic that forces a safe state and latches.
+  \item[ISA-18.2] The standard for alarm management in process industries.
+  \item[Isolation forest] Tree ensemble that scores how easily a point is
+        isolated by random splits.
+  \item[LOCF] Last observation carried forward.
+  \item[Modbus TCP] Simple register-based field protocol.
+  \item[MSPC] Multivariate statistical process control.
+  \item[OPC UA] Information-model protocol with typed, browsable nodes.
+  \item[OP, PV, SP] Controller output, process value, setpoint.
+  \item[P\&ID] Piping and instrumentation diagram.
+  \item[PCA] Principal component analysis.
+  \item[Persistence] Consecutive flagged windows required for a detection.
+  \item[PLC] Programmable logic controller.
+  \item[RK4] Fourth-order Runge--Kutta integration.
+  \item[SCADA] Supervisory control and data acquisition.
+  \item[Scan cycle] Read inputs, execute logic, write outputs, repeat.
+  \item[Shelving] Temporary, expiring suppression of an alarm.
+  \item[SPE ($Q$)] Squared prediction error off the PCA subspace.
+  \item[Stiction] Static friction in a valve: sticking, then slipping.
+  \item[TON] On-delay timer.
+  \item[Velocity form] PID computing the change in output each scan.
+  \item[ZOH] Zero-order hold; output held constant between samples.
+\end{description}

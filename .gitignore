@@ -1,0 +1,45 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# --- environments ---
+.venv/
+venv/
+env/
+.env
+
+# --- editors ---
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# --- pyplant runtime output ---
+# A workspace holds generated datasets, trained detectors, the historian
+# database and service logs. All of it is reproducible from the code and the
+# workspace config; none of it belongs in version control.
+work/
+artifacts/
+*.duckdb
+*.duckdb.wal
+*.parquet
+*.joblib
+*.log
+
+# --- LaTeX build output (compiled PDFs are kept in docs/pdf/) ---
+docs/manual/*.aux
+docs/manual/*.toc
+docs/manual/*.out
+docs/manual/*.fls
+docs/manual/*.fdb_latexmk
+docs/manual/*.synctex.gz
+docs/manual/*.pdf
+docs/manual/*.mp4

@@ -1,0 +1,228 @@
+\chapter{Control theory and the LIC101 loop}
+\label{ch:control}
+
+This chapter explains feedback control from first principles and then the
+specific controller in \code{pyplant/plc/pid.py}: a velocity-form PID with
+structural anti-windup, bumpless transfer, derivative on filtered measurement
+and IMC tuning.
+
+\section{Feedback control}
+
+A feedback loop measures the controlled variable (the \emph{process value},
+PV), compares it with the desired value (the \emph{setpoint}, SP), and moves
+a manipulated variable (the \emph{controller output}, OP) to remove the
+difference $e = \text{SP} - \text{PV}$. Figure~\ref{fig:loop} shows LIC101 in
+this form.
+
+\begin{figure}[htbp]
+\centering
+\scalebox{0.8}{%
+\begin{tikzpicture}[node distance=11mm]
+  \node (sp) {SP};
+  \node[circle,draw,right=8mm of sp,inner sep=2pt] (sum) {$\Sigma$};
+  \node[hot,right=of sum] (c) {PID $C(s)$\\LIC101};
+  \node[box,right=of c] (zoh) {ZOH\\$T_s=0.1$\,s};
+  \node[box,right=of zoh] (p) {valve + tank\\$G(s)=\dfrac{K}{\tau s+1}$};
+  \node[circle,draw,right=10mm of p,inner sep=2pt] (dsum) {$\Sigma$};
+  \node[right=8mm of dsum] (pv) {level};
+  \node[above=8mm of dsum] (d) {disturbance (leak)};
+  \node[box,below=10mm of zoh] (m) {LT101\\+ noise};
+  \draw[flow] (sp) -- (sum);
+  \draw[flow] (sum) -- node[lbl,above]{$e$} (c);
+  \draw[flow] (c) -- node[lbl,above]{OP} (zoh);
+  \draw[flow] (zoh) -- (p);
+  \draw[flow] (p) -- (dsum);
+  \draw[flow] (d) -- (dsum);
+  \draw[flow] (dsum) -- (pv);
+  \draw[flow] ($(dsum.east)+(4mm,0)$) |- (m);
+  \draw[flow] (m) -| node[lbl,pos=0.9,left]{$-$PV} (sum);
+\end{tikzpicture}}
+\caption{LIC101 as a feedback loop. The PLC samples the level every 100\,ms and
+holds its output between scans.}
+\label{fig:loop}
+\end{figure}
+
+\section{The PID law}
+
+The ideal continuous PID controller in standard (ISA) form is
+\begin{equation}
+  u(t) = K_c\left( e(t) + \frac{1}{T_i}\int_0^t e(\tau)\,d\tau
+         + T_d\frac{de}{dt}\right),
+\end{equation}
+with controller gain $K_c$, integral time $T_i$ and derivative time $T_d$. Each
+term has a role:
+\begin{description}
+  \item[Proportional] reacts to the present error. Alone it leaves a steady
+        offset whenever a non-zero output is needed to hold the setpoint.
+  \item[Integral] accumulates past error and keeps moving the output until
+        the error is exactly zero. It removes offset, and it is the reason a
+        leak is masked (Section~\ref{sec:masking}).
+  \item[Derivative] anticipates by reacting to the rate of change. On a noisy
+        level it does more harm than good, so LIC101 runs with $T_d=0$.
+\end{description}
+
+\subsection{Positional and velocity forms}
+
+Discretising at sample time $T_s$ with backward differences gives the
+\emph{positional} form
+\begin{equation}
+  u_k = K_c\Big(e_k + \frac{T_s}{T_i}\sum_{j\le k} e_j
+        + \frac{T_d}{T_s}(e_k - e_{k-1})\Big).
+\end{equation}
+Subtracting $u_{k-1}$ from $u_k$ gives the \emph{velocity} (incremental) form
+used here:
+\begin{equation}
+  \Delta u_k = K_c(e_k - e_{k-1}) + K_c\frac{T_s}{T_i}e_k
+   - K_c\frac{T_d}{T_s}\big(y^f_k - 2y^f_{k-1} + y^f_{k-2}\big),
+  \qquad u_k = \operatorname{clip}\big(u_{k-1} + \Delta u_k,\,0,\,100\big),
+  \label{eq:velocity}
+\end{equation}
+where $y^f$ is the filtered measurement (below). For a reverse-acting loop the
+derivative term has a minus sign because it acts on the measurement.
+
+\subsection{Why the velocity form}
+
+In the velocity form the output itself is the integrator state. Two
+properties that need extra logic in the positional form become automatic:
+
+\begin{theory}[Anti-windup is structural]
+When the actuator saturates, a positional PID keeps integrating the error, so
+the integral grows far beyond the limit (\emph{windup}) and the output stays
+pinned long after the error reverses. In equation~\eqref{eq:velocity} the
+increment that would push past a limit is simply clipped away. No hidden
+accumulator grows, and the output leaves the limit on the first scan the
+error changes sign.
+\end{theory}
+
+\begin{theory}[Bumpless transfer is structural]
+In manual mode the output is whatever the operator writes, and the controller
+keeps its error history fresh against the current PV (\code{track()}). On
+return to auto it continues incrementing from the manual value, so the valve
+does not jump.
+\end{theory}
+
+\subsection{Derivative on filtered measurement}
+
+Taking the derivative of the error differentiates the setpoint too, so a
+setpoint step would produce an impulse (\emph{derivative kick}). The code
+differentiates the measurement instead. The measurement is first passed
+through a first-order low-pass filter with time constant $T_f = 5$\,s,
+discretised as
+\begin{equation}
+  y^f_k = y^f_{k-1} + \alpha\,(y_k - y^f_{k-1}),
+  \qquad \alpha = \frac{T_s}{T_f + T_s}.
+\end{equation}
+
+\subsection{Initialisation from valve feedback}
+
+A velocity PID increments from wherever its output already is. Starting at
+0\% would slam shut the valve of a plant running at 66\%, dead-head the pump
+and trip the interlock on the first scan. On the first scan the program
+therefore seeds the output from the measured stem position \tg{ZT101}.
+
+\section{IMC tuning}
+\label{sec:imc}
+
+Internal Model Control (IMC) tuning chooses the controller so that the closed
+loop behaves like a first-order lag with a time constant $\lambda$ the
+engineer specifies. For a first-order process
+\begin{equation}
+  G(s) = \frac{K}{\tau s + 1},
+\end{equation}
+the IMC controller is $Q(s) = G^{-1}(s)\,\frac{1}{\lambda s+1}$ and the
+equivalent feedback controller is
+\begin{equation}
+  C(s) = \frac{Q}{1 - GQ} = \frac{\tau s + 1}{K\lambda s}
+       = \frac{\tau}{K\lambda}\left(1 + \frac{1}{\tau s}\right),
+\end{equation}
+which is a PI controller with
+\begin{equation}
+  \boxed{K_c = \frac{\tau}{K\lambda}, \qquad T_i = \tau .}
+\end{equation}
+The integral time cancels the process pole, and the closed-loop response to a
+setpoint step is
+\begin{equation}
+  \frac{\text{PV}(s)}{\text{SP}(s)} = \frac{GC}{1+GC} = \frac{1}{\lambda s+1}.
+\end{equation}
+
+For LIC101, $K = 15.4$\,mm/\%, $\tau = 72$\,s and $\lambda = 13$\,s:
+\[
+  K_c = \frac{72}{15.4\times13} \approx 0.36 \;\to\; 0.35\ \%/\text{mm},
+  \qquad T_i = 72\ \text{s}, \qquad T_d = 0.
+\]
+The ratio $\tau/\lambda\approx5.5$ gives a closed loop five times faster than
+the open loop while leaving margin for the neglected valve lag, the sample
+time and the nonlinearity.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+\begin{axis}[width=0.6\textwidth,height=4.2cm,xlabel={time after step (s)},
+  ylabel={level (mm)},grid=major,grid style={linegrey},xmin=0,xmax=120,
+  ymin=290,ymax=360,legend pos=south east]
+\addplot[slate,dashed,thick] coordinates {(0,300)(0,350)(120,350)};
+\addplot[accent,very thick,domain=0:120,samples=120]{300+50*(1-exp(-x/13))};
+\addplot[badred,thick,domain=0:120,samples=120]{300+50*(1-exp(-x/72))};
+\addplot[only marks,mark=|,mark size=4pt] coordinates {(52,349)};
+\legend{setpoint, closed loop ($\lambda=13$\,s), open loop ($\tau=72$\,s), 2\% settled}
+\end{axis}
+\end{tikzpicture}
+\caption{Ideal response to a 50\,mm setpoint step. The measured response of
+the real loop matches: no overshoot, 2\% settling in about 40--50\,s, zero
+offset.}
+\label{fig:step}
+\end{figure}
+
+\section{Sampling and the zero-order hold}
+
+The PLC executes every $T_s = 100$\,ms and holds its output until the next
+scan. A zero-order hold behaves approximately like a dead time of $T_s/2 =
+50$\,ms, negligible against $\lambda = 13$\,s, but it is modelled physically
+rather than ignored: the simulator integrates at 50\,ms with the input held
+between scans. A PID that looks better in simulation than on a PLC usually
+lacks exactly this.
+
+\section{Why integral action hides a leak}
+\label{sec:masking}
+
+A leak is a load disturbance $d$ on tank~1. With a PI controller the
+steady-state error to a step disturbance is, by the final value theorem,
+\begin{equation}
+  e_\infty = \lim_{s\to0} s\cdot\frac{G_d(s)}{1+G(s)C(s)}\cdot\frac{d}{s} = 0,
+\end{equation}
+because $C(s)$ has a pole at $s=0$. The controller drives the level back to
+setpoint exactly, and the only lasting evidence is that the output has moved:
+
+\begin{center}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+& \tg{LT101} & \tg{LIC101_OP} \\
+\midrule
+before the leak & 300.00\,mm & 66.18\% \\
+after the leak & 300.00\,mm & 75.80\% \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+A diagnosis model fed only the process value cannot see this fault. This is
+why the detectors are given the controller output, the valve position and
+derived physics channels (Chapter~\ref{ch:ml}).
+
+\section{Controller parameters}
+
+\begin{center}
+\begin{tabular}{@{}llll@{}}
+\toprule
+\code{PidTuning} field & Default & Unit & Meaning \\
+\midrule
+\code{kc} & 0.35 & \%/mm & controller gain \\
+\code{ti} & 72.0 & s & integral time (0 disables integral action) \\
+\code{td} & 0.0 & s & derivative time (0 disables derivative) \\
+\code{tf} & 5.0 & s & derivative filter time constant \\
+\code{out_lo}, \code{out_hi} & 0, 100 & \% & output limits \\
+\code{direct_acting} & False & & False: output rises when PV falls \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Chapter~\ref{ch:params} explains how to change them.

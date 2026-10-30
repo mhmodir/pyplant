@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use pyplant in your work, please cite it as below."
+title: "pyplant: a simulated process plant with a soft PLC, SCADA stack and machine-learning fault detection"
+type: software
+authors:
+  - family-names: Modirrousta
+    given-names: Mohammadhossein
+    affiliation: "University of Alberta"
+version: 0.1.0
+license: MIT
+repository-code: "https://github.com/mhmodir/pyplant"
+keywords:
+  - process control
+  - fault detection
+  - SCADA
+  - OPC UA
+  - Modbus
+  - digital twin

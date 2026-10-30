@@ -1,0 +1,204 @@
+\chapter{Introduction}
+\label{ch:intro}
+
+\section{What pyplant is}
+
+\textbf{pyplant} is a complete, simulated industrial control system for a
+small process plant, written entirely in Python. It contains every layer a
+real installation has, from the physics at the bottom to a data-driven fault
+diagnosis service at the top:
+
+\begin{itemize}
+  \item a \emph{physics simulator} of two gravity-drained tanks fed by a
+        centrifugal pump through a control valve;
+  \item a \emph{soft PLC} with a deterministic scan cycle, a velocity-form PID
+        controller, alarms and a latched pump interlock;
+  \item a \emph{field network} using Modbus TCP between the plant and the PLC;
+  \item an \emph{OPC UA server} that publishes every signal with engineering
+        units and ranges;
+  \item a \emph{historian} that stores samples in DuckDB and answers
+        step-hold window queries;
+  \item an \emph{operator HMI} with a mimic diagram, trends and an
+        ISA-18.2 alarm list;
+  \item a \emph{fault injection layer} and a \emph{scenario runner} that
+        produce perfectly labelled datasets;
+  \item a \emph{machine-learning toolbox} with four anomaly detectors, from
+        z-score limits to a neural autoencoder, evaluated with operator-facing
+        metrics;
+  \item the \emph{workbench}: one web page that drives all of the above.
+\end{itemize}
+
+Nothing requires hardware or vendor software. Every number in this manual can
+be reproduced on a laptop.
+
+\section{Who this manual is for}
+
+The manual serves three audiences, and each chapter says which one it is
+written for.
+
+\begin{description}
+  \item[Users] who want to run the plant, break it and train a detector.
+        Read Chapters~\ref{ch:install}, \ref{ch:workbench} and
+        \ref{ch:tutorials}.
+  \item[Students] of control, automation or machine learning who want the
+        theory behind each layer. Chapters~\ref{ch:plant} to \ref{ch:eval}
+        derive every model and algorithm the code implements.
+  \item[Developers] who want to change parameters, add a tag, a fault or a
+        detection method. Chapters~\ref{ch:params} to \ref{ch:api}.
+\end{description}
+
+\section{The process in one picture}
+
+Figure~\ref{fig:pid} is the piping and instrumentation view of the plant. A
+pump (\tg{PMP101}) delivers water through an equal-percentage control valve
+(\tg{FCV101}) into tank~1. Tank~1 drains by gravity through an orifice into
+tank~2, which drains to atmosphere. The level controller \tg{LIC101} holds the
+level in tank~1 (\tg{LT101}) at its setpoint by moving the valve. Tank~2 is not
+controlled, so disturbances in tank~1 reach it with a lag, which is useful for
+diagnosis.
+
+\begin{figure}[htbp]
+\centering
+\scalebox{0.8}{%
+\begin{tikzpicture}[scale=1,every node/.style={font=\small}]
+  % pump
+  \draw[thick,fill=panelgrey] (0,0) circle (0.55);
+  \draw[thick] (-0.35,-0.42) -- (0,0.55) -- (0.35,-0.42);
+  \node[below=6mm] at (0,0) {PMP101};
+  % pipe to valve
+  \draw[very thick,accent] (0.55,0) -- (2.2,0);
+  % valve (bowtie)
+  \draw[thick,fill=panelgrey] (2.2,-0.35) -- (3.0,0.35) -- (3.0,-0.35) -- (2.2,0.35) -- cycle;
+  \draw[thick] (2.6,0) -- (2.6,0.75);
+  \draw[thick,fill=white] (2.3,0.75) rectangle (2.9,1.05);
+  \node[below=4mm] at (2.6,-0.2) {FCV101};
+  \draw[very thick,accent] (3.0,0) -- (4.2,0) -- (4.2,3.4) -- (4.6,3.4);
+  % instruments on the discharge
+  \draw (1.3,0) -- (1.3,0.8);
+  \node[circle,draw,align=center,inner sep=0pt,minimum size=8mm,fill=white] at (1.3,1.2) {\scriptsize PT\\[-3pt]\scriptsize 101};
+  \draw (3.6,0) -- (3.6,-0.8);
+  \node[circle,draw,align=center,inner sep=0pt,minimum size=8mm,fill=white] at (3.6,-1.2) {\scriptsize FT\\[-3pt]\scriptsize 101};
+  % tank 1
+  \draw[thick] (4.6,4) -- (4.6,0.5) -- (6.6,0.5) -- (6.6,4);
+  \fill[accent!25] (4.62,0.52) rectangle (6.58,2.4);
+  \node at (5.6,4.3) {Tank 1};
+  \node at (5.6,1.4) {$h_1$};
+  % LT101 and controller
+  \draw (6.6,2.0) -- (7.2,2.0);
+  \node[circle,draw,align=center,inner sep=0pt,minimum size=8mm,fill=white] (lt) at (7.6,2.0) {\scriptsize LT\\[-3pt]\scriptsize 101};
+  \node[circle,draw,align=center,inner sep=0pt,minimum size=9mm,fill=accent!15] (lic) at (7.6,5.2) {\scriptsize LIC\\[-3pt]\scriptsize 101};
+  \draw[dashed] (lt) -- (lic);
+  \draw[dashed,->] (lic) -| (2.6,1.05);
+  % orifice to tank 2
+  \draw[very thick,accent] (6.6,0.8) -- (8.8,0.8);
+  \draw[thick] (7.6,0.55) -- (7.6,1.05);
+  \node[below=3mm] at (7.6,0.6) {\footnotesize orifice $C_dA_{12}$};
+  % tank 2
+  \draw[thick] (8.8,3.6) -- (8.8,0.3) -- (10.8,0.3) -- (10.8,3.6);
+  \fill[accent!25] (8.82,0.32) rectangle (10.78,1.6);
+  \node at (9.8,3.9) {Tank 2};
+  \node at (9.8,1.0) {$h_2$};
+  \draw (10.8,1.3) -- (11.3,1.3);
+  \node[circle,draw,align=center,inner sep=0pt,minimum size=8mm,fill=white] at (11.7,1.3) {\scriptsize LT\\[-3pt]\scriptsize 102};
+  % drain
+  \draw[very thick,accent] (9.8,0.3) -- (9.8,-0.6) -- (11.0,-0.6);
+  \node[circle,draw,align=center,inner sep=0pt,minimum size=8mm,fill=white] at (11.5,-0.6) {\scriptsize FT\\[-3pt]\scriptsize 102};
+  \node[right] at (11.95,-0.6) {drain};
+  % leak
+  \draw[->,badred,thick,dashed] (5.0,0.5) -- (5.0,-0.4) node[below] {\footnotesize leak};
+\end{tikzpicture}}
+\caption{Process and instrumentation of the two-tank plant. Solid blue lines
+are piping, dashed black lines are signals. The red dashed arrow is where the
+leak fault opens a hole in tank 1.}
+\label{fig:pid}
+\end{figure}
+
+\section{Architecture}
+
+The software is split into processes exactly as a real plant is split into
+devices. Figure~\ref{fig:arch} shows the four runtime services, the networks
+between them, and the workbench that supervises them.
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.82\linewidth}{!}{%
+\begin{tikzpicture}[node distance=9mm and 16mm]
+  \node[box,minimum width=34mm] (plant) {\textbf{Plant node}\\physics (RK4, 50 ms)\\fault injection\\Modbus slave};
+  \node[hot,minimum width=34mm,right=of plant] (plc) {\textbf{Soft PLC}\\scan engine, 100 ms\\PID, alarms, interlock\\Modbus client + server};
+  \node[box,minimum width=34mm,right=of plc] (opc) {\textbf{OPC UA server}\\address space from\\the tag dictionary};
+  \node[box,minimum width=30mm,above right=8mm and 10mm of opc] (hist) {\textbf{Historian}\\DuckDB, LOCF windows};
+  \node[box,minimum width=30mm,below right=8mm and 10mm of opc] (hmi) {\textbf{HMI}\\mimic, trend,\\ISA-18.2 alarms};
+  \draw[flow,<->] (plant) -- node[lbl,above=4pt]{Modbus TCP} (plc);
+  \draw[flow,<->] (plc) -- node[lbl,above=4pt]{in-process} (opc);
+  \draw[flow] (opc) |- node[lbl,pos=0.7,above]{subscribe} (hist);
+  \draw[flow,<->] (opc) |- node[lbl,pos=0.7,below]{read / write} (hmi);
+  \draw[flow] (hist.south) -- node[lbl,right]{HTTP window} (hmi.north);
+  \node[good,text width=150mm,below=26mm of plc] (wb) {\textbf{Workbench} (Dash, port 8050): starts and stops the services,
+  talks to them over HTTP, runs offline scenarios, datasets and training jobs};
+  \draw[dflow] (wb.north -| plant) -- node[lbl]{fault API} (plant.south);
+  \draw[dflow] (wb.north -| plc) -- node[lbl]{supervises} (plc.south);
+  \draw[dflow] (wb.north -| hmi) -- node[lbl]{operator API} (hmi.south);
+  \begin{scope}[on background layer]
+    \node[draw=linegrey,dashed,rounded corners,fit=(plant)(plc)(opc)(hist)(hmi),inner sep=5mm,
+      label={[font=\footnotesize\itshape,anchor=south west]north west:runtime stack, one process per service}] {};
+  \end{scope}
+\end{tikzpicture}}
+\caption{Runtime architecture. Each box in the dashed frame is a separate
+operating-system process. The workbench is a client of the stack, never a
+participant in it.}
+\label{fig:arch}
+\end{figure}
+
+Three design rules recur throughout the code base and this manual:
+
+\begin{enumerate}
+  \item \textbf{One source of truth per fact.} Every signal is declared once,
+        in the tag dictionary \code{pyplant/tags.py}. Addresses, scale factors,
+        alarm limits and OPC UA paths are derived from it, never retyped.
+  \item \textbf{Ownership.} Every tag has exactly one owner process. A process
+        writes only what it owns. The plant cannot write controller outputs and
+        the HMI cannot write measurements.
+  \item \textbf{The same code drives the live plant and the datasets.} The
+        offline scenario runner and the live plant node step the identical
+        \code{Simulation} object with the identical PLC \code{Program}, so the
+        training data cannot drift away from the running plant.
+\end{enumerate}
+
+\section{The two execution paths}
+
+\begin{figure}[htbp]
+\centering
+\scalebox{0.8}{%
+\begin{tikzpicture}[node distance=7mm and 10mm]
+  \node[box,minimum width=36mm] (sim) {\code{Simulation}\\(runners/base.py)};
+  \node[box,minimum width=36mm,below=of sim] (prog) {PLC \code{Program}\\(plc/program.py)};
+  \node[hot,left=12mm of sim,minimum width=38mm] (fast) {\textbf{Offline path}\\fast runner, no clock\\$\approx$1900$\times$ real time};
+  \node[hot,right=12mm of sim,minimum width=38mm] (live) {\textbf{Live path}\\\code{PlantService} + \code{ScanEngine}\\wall-clock tickers};
+  \node[good,below=of fast] (ds) {Quick start scenario,\\datasets, training};
+  \node[good,below=of live] (rt) {Runtime tab, HMI,\\historian, fault API};
+  \draw[flow] (fast) -- (sim); \draw[flow] (live) -- (sim);
+  \draw[flow] (fast) |- (prog); \draw[flow] (live) |- (prog);
+  \draw[flow] (fast) -- (ds); \draw[flow] (live) -- (rt);
+\end{tikzpicture}}
+\caption{Two drivers, one model. Neither path owns the physics or the logic.}
+\label{fig:paths}
+\end{figure}
+
+The \emph{offline path} (Figure~\ref{fig:paths}, left) runs the plant and the
+PLC program in a tight loop with no clock and no network. A simulated hour
+takes under two seconds. It is used by the Quick start tab, by dataset
+generation and by the tests. The \emph{live path} (right) runs the same objects
+against wall-clock schedulers, splits them into processes and connects them
+with Modbus and OPC UA. It is used whenever the stack is started.
+
+\section{Conventions in this manual}
+
+\begin{itemize}
+  \item Tag names are set in sans serif, e.g.\ \tg{LT101}.
+  \item File names, Python identifiers and commands are set in
+        typewriter type, e.g.\ \code{pyplant/plc/pid.py}.
+  \item Buttons and labels in the workbench are set in bold, e.g.\
+        \ui{Start stack}.
+  \item Physical quantities inside the code are SI. Engineering units
+        (mm, L/min, kPa, \%) appear only at the instrument boundary.
+\end{itemize}

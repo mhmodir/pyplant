@@ -1,0 +1,141 @@
+\chapter{Installation and first run}
+\label{ch:install}
+
+\section{Requirements}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{@{}lX@{}}
+\toprule
+Item & Requirement \\
+\midrule
+Python & 3.11 or newer (3.12 is used for development) \\
+Operating system & Windows, Linux or macOS \\
+Memory & 2\,GB free is ample \\
+Runtime libraries & numpy, pandas, pymodbus 3.8.x, asyncua, duckdb, fastapi, uvicorn, httpx \\
+Machine learning (\code{ml} extra) & scikit-learn, pyarrow, joblib \\
+Workbench UI (\code{ui} extra) & dash, plotly \\
+Tests (\code{dev} extra) & pytest \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\begin{warn}[pymodbus must stay on 3.8.x]
+The 3.15 line of pymodbus replaced the datastore API this project uses and no
+longer offers a way to update served values from outside the server, which is
+what a live plant does twenty times a second. \code{pyproject.toml} pins
+\code{pymodbus>=3.8,<3.9}; do not relax it.
+\end{warn}
+
+\section{Installing}
+
+From the directory that contains \code{pyproject.toml}:
+
+\begin{lstlisting}[style=sh]
+# a dedicated environment is recommended
+conda create -n pyplant python=3.12 -y
+conda activate pyplant
+
+pip uninstall -y pyplant          # an unrelated PyPI package has this name
+pip install -e ".[ml,ui,dev]"     # everything: stack, ML, workbench, tests
+python -c "import pyplant.hist.db; print('ok')"
+\end{lstlisting}
+
+The \code{-e} (editable) flag puts this directory on the Python path, so an
+edited file takes effect without reinstalling and \code{python -m pyplant...}
+works from any directory.
+
+\begin{note}[Windows with several Pythons]
+If \code{python --version} reports something older than 3.11, call the
+environment's interpreter explicitly, for example
+\begin{lstlisting}[style=sh]
+C:\Users\you\anaconda3\envs\pyplant\python.exe -m pyplant.workbench.app
+\end{lstlisting}
+\end{note}
+
+\section{Checking the installation}
+
+\begin{lstlisting}[style=sh]
+python -m pyplant.tags          # prints the tag list and the Modbus block plan
+pytest -q                       # full suite, about five minutes
+pytest -q -m "not slow"         # skips tests that start real subprocesses
+\end{lstlisting}
+
+\section{Starting the workbench}
+
+\begin{lstlisting}[style=sh]
+python -m pyplant.workbench.app --workspace ./work/demo --base-port 5400
+\end{lstlisting}
+
+Then open \url{http://127.0.0.1:8050}. The options are:
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Option & Default & Meaning \\
+\midrule
+\code{--workspace} & \code{./work/demo} & directory holding config, data, models and logs \\
+\code{--base-port} & 5400 & first of six consecutive ports for the stack \\
+\code{--host} & 127.0.0.1 & interface the workbench page listens on \\
+\code{--port} & 8050 & port of the workbench page \\
+\code{--debug} & off & Dash debug mode with hot reload \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+With \code{--base-port 5400} the stack uses the ports in
+Table~\ref{tab:ports}. Several people on one machine can each run a stack by
+choosing different base ports.
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{@{}llll@{}}
+\toprule
+Port & Offset & Service & Protocol \\
+\midrule
+5400 & +0 & plant Modbus slave & Modbus TCP \\
+5401 & +1 & plant fault-injection API & HTTP \\
+5402 & +2 & PLC Modbus server (SCADA side) & Modbus TCP \\
+5403 & +3 & PLC OPC UA endpoint, \code{/pyplant/} & OPC UA \\
+5404 & +4 & historian query API & HTTP \\
+5405 & +5 & HMI operator page and API & HTTP \\
+\bottomrule
+\end{tabular}
+\caption{Ports allocated from the base port.}
+\label{tab:ports}
+\end{table}
+
+\section{The workspace directory}
+
+Everything a session produces lives in the workspace, and nothing it produces
+lives anywhere else:
+
+\begin{lstlisting}[style=sh]
+work/demo/
+  config.json          speed, dt, ports, plant, loop and data settings
+  runs.jsonl           append-only log of every action and its result
+  dataset.parquet      the generated, labelled dataset
+  history.duckdb       the historian database of the live stack
+  artifacts/           trained detectors, manifest.json, metrics.json, per-run CSVs
+  jobs/                progress files of background jobs and service logs
+\end{lstlisting}
+
+Deleting the workspace is always safe: the next start recreates it with
+default settings.
+
+\section{Running the stack by hand}
+
+The workbench starts the four services for you, but each can be started from
+a terminal. This is useful for debugging and is exactly what the workbench
+runs (the Runtime tab shows the command lines).
+
+\begin{lstlisting}[style=sh]
+python -m pyplant.services.plant     --port 5020 --control-port 5021
+python -m pyplant.services.plc       --plant-port 5020 --port 5022 --opcua-port 5023
+python -m pyplant.services.historian --endpoint opc.tcp://127.0.0.1:5023/pyplant/ \
+                                     --db history.duckdb --api-port 5024
+python -m pyplant.services.hmi       --endpoint opc.tcp://127.0.0.1:5023/pyplant/ \
+                                     --history http://127.0.0.1:5024 --port 5025
+\end{lstlisting}
+
+Start them in this order; each depends on the one before it. All command-line
+options are listed in Section~\ref{sec:cli}.

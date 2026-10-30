@@ -1,0 +1,180 @@
+\chapter{Using the toolbox step by step}
+\label{ch:tutorials}
+
+This chapter walks through the toolbox in the order the workflow cards
+suggest. Figure~\ref{fig:workflow} is the whole procedure as a flow diagram;
+each tutorial below covers one part of it.
+
+\begin{figure}[htbp]
+\centering
+\scalebox{0.8}{%
+\begin{tikzpicture}[node distance=6mm and 8mm]
+  \node[term] (start) {Open the workbench};
+  \node[box,below=of start,minimum width=60mm] (s1) {1. Run the default scenario (offline)};
+  \node[decision,below=of s1] (q1) {Need a live\\plant?};
+  \node[box,below=of q1,minimum width=60mm] (s2) {2. Start the stack, choose speed $\le 4$};
+  \node[box,below=of s2,minimum width=60mm] (s3) {3. Inject faults, operate LIC101,\\watch trend, alarms, ground truth};
+  \node[box,right=14mm of s2,minimum width=46mm] (s4) {4. Generate a dataset\\(Quick preset first)};
+  \node[box,below=of s4,minimum width=46mm] (s5) {5. Tick methods, Train};
+  \node[decision,below=of s5] (q2) {Results\\good enough?};
+  \node[box,below=of q2,minimum width=46mm] (s6) {Read per-mode table,\\deployed detector in\\\code{artifacts/}};
+  \node[box,right=8mm of q2,minimum width=30mm] (tune) {Bigger preset, other\\window / quantile,\\other methods};
+  \node[term,below=of s6] (end) {Done};
+  \draw[flow] (start) -- (s1);
+  \draw[flow] (s1) -- (q1);
+  \draw[flow] (q1) -- node[lbl,right]{yes} (s2);
+  \draw[flow] (q1.east) -| node[lbl,pos=0.25,above]{no} (s4.north);
+  \draw[flow] (s2) -- (s3);
+  \draw[flow] (s3.east) -- ++(6mm,0) |- (s4.west);
+  \draw[flow] (s4) -- (s5);
+  \draw[flow] (s5) -- (q2);
+  \draw[flow] (q2) -- node[lbl,right]{yes} (s6);
+  \draw[flow] (q2) -- node[lbl,above]{no} (tune);
+  \draw[flow] (tune.north) |- (s4.east);
+  \draw[flow] (s6) -- (end);
+\end{tikzpicture}}
+\caption{Recommended workflow through the toolbox.}
+\label{fig:workflow}
+\end{figure}
+
+\section{Tutorial 1: the default scenario}
+
+\begin{enumerate}
+  \item Start the workbench and open \url{http://127.0.0.1:8050}. The Quick
+        start tab opens and the default leak scenario runs by itself.
+  \item Read the summary cards. With the setpoint held, \tg{LT101} ends where
+        it started ($\pm0.1$\,mm) while the controller output rises by about
+        9.6\%. This is the central fact of the project: in a closed loop the
+        controller absorbs the fault, so the measurement alone does not show
+        it.
+  \item Choose \ui{Sticking control valve}, length \ui{1 hour}, and press
+        \ui{Run scenario}. After onset the level starts to hunt and the
+        orange controller output and the green stem position stop agreeing:
+        the valve is stuck until the command moves far enough, then jumps.
+  \item Choose \ui{LT101 frozen}, tick \ui{setpoint moves}, and run. After
+        the setpoint changes the controller chases a reading that cannot
+        follow, winds the valve shut, starves the pump, and the minimum-flow
+        interlock trips. The \ui{Pump trip} card shows when.
+\end{enumerate}
+
+\section{Tutorial 2: the live plant}
+
+\begin{enumerate}
+  \item Set \ui{Speed} to $1\times$ or $2\times$ (at most $4\times$ on
+        Windows) and press \ui{Start stack}. After about ten seconds the
+        services pill reads \ui{4/4 services}.
+  \item Open the Runtime tab. The plant starts lined out at its design point:
+        \tg{LT101} $\approx$ 300\,mm, valve $\approx$ 66\%, flow
+        $\approx$ 10\,L/min, pump pressure $\approx$ 50\,kPa.
+  \item \textbf{Setpoint step.} Type 350 in \ui{Setpoint} and press
+        \ui{Write}. The level rises to 350\,mm in about 40\,s with no
+        overshoot (IMC tuning, Section~\ref{sec:imc}).
+  \item \textbf{Manual mode.} Press \ui{Manual}, write 50 to \ui{Manual OP}.
+        The valve closes to 50\% and the level falls; the controller is not
+        acting. Press \ui{Auto}: the output continues from 50\% without a jump
+        (bumpless transfer) and the level returns to setpoint.
+  \item \textbf{Rejected write.} Write 3000 to \ui{Setpoint}. The HMI refuses
+        it with an error message instead of clamping it silently.
+  \item \textbf{Interlock.} Press pump \ui{Stop} and then \ui{Start} while
+        watching the alarms, or raise the setpoint to 560\,mm so the level
+        crosses the 550\,mm trip. The interlock latches, the pump stops and
+        the valve closes. Restore a normal setpoint and press
+        \ui{Reset interlock}.
+\end{enumerate}
+
+\section{Tutorial 3: faults on the live plant}
+
+\begin{enumerate}
+  \item Open the Faults tab and press \ui{Leak in tank 1}. The active-fault
+        list shows the new fault; the ground-truth table shows readings equal
+        to the true values, because a leak is a process fault and the
+        instruments are honest.
+  \item On the Runtime tab, the controller output climbs by about 10\% over a
+        minute while the level holds.
+  \item Press \ui{Clear all faults}, then \ui{LT101 reads 25 mm high}. Now the
+        ground-truth table shows \tg{LT101} reported 25\,mm above its true
+        value. The controller drives the \emph{reading} back to 300\,mm, so
+        the true level sits 25\,mm low and \tg{LT102} falls.
+  \item Try \ui{Sticking valve} at $4\times$ speed for a few minutes and
+        watch \tg{LIC101_OP} and \tg{ZT101} on the mimic diverge.
+  \item Use \ui{Or build one} to inject, for example, \code{pump_wear} with
+        magnitude 0.3 and ramp 300\,s, and watch \tg{PT101} fall below what
+        the pump curve predicts.
+\end{enumerate}
+
+\section{Tutorial 4: a dataset}
+
+\begin{enumerate}
+  \item Open the Data tab and press \ui{Quick (\textasciitilde 1.5 min)}.
+        The fields become 1200\,s, 1 magnitude, 1 repeat, 6 normal runs.
+  \item Press \ui{Generate}. The progress bar fills; when it finishes,
+        \ui{Recent runs} shows a \code{dataset} row with the number of runs
+        and samples, and \code{dataset.parquet} appears in the workspace.
+  \item For publishable numbers use \ui{Standard} (58 runs of an hour) or
+        \ui{Thorough}.
+\end{enumerate}
+
+The dataset is generated offline, in plant time, with the same code as the
+live plant (Figure~\ref{fig:paths}). Each row is one second of one run and
+carries all signals, the label, the fault kind, target, onset and ramp.
+
+\section{Tutorial 5: training and comparing detectors}
+
+\begin{enumerate}
+  \item Open the Model tab. Leave all four methods ticked, window 60,
+        stride 10, quantile 0.995, and press \ui{Train}.
+  \item When the bar is full, the Results table compares the methods. The
+        method with the highest detection rate is deployed; ties go to the one
+        with fewer false alarms and then to the simpler method.
+  \item Read the \ui{By fault mode} table. For leak, pump wear, stiction and
+        fouling the \ui{expected} column names the physics channel the fault
+        should implicate; a match is an isolated fault.
+  \item The deployed detector is \code{artifacts/detector.joblib} with its
+        \code{manifest.json}; every method's detector and per-run CSV are kept
+        beside it.
+\end{enumerate}
+
+On the Quick dataset, a typical result is:
+
+\begin{center}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+Method & Detected & Median delay & False alarms/day & Isolation \\
+\midrule
+Z-score limits & 62.5\% & 341\,s & 0.00 & 100\% \\
+PCA / MSPC & 87.5\% & 43\,s & 0.00 & 80\% \\
+Isolation forest & 37.5\% & 354\,s & 0.00 & 100\% \\
+Autoencoder & 87.5\% & 43\,s & 0.00 & 60\% \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+On the Standard dataset the README reports the autoencoder at 100\%
+detection with a 70\,s median delay and PCA at 83\% with 256\,s. Small
+datasets favour simple models; larger ones let the learned model pull ahead.
+
+\section{Tutorial 6: the same pipeline from Python}
+
+Everything the workbench does is available as functions:
+
+\begin{lstlisting}
+from pyplant.workbench.tasks import (run_default_scenario,
+                                     generate_dataset, train_detector)
+
+result = run_default_scenario("stiction", duration=3600.0)
+print(result["onset"], result["series"]["LIC101_OP"][-1])
+
+noop = lambda fraction, message="": None      # progress callback
+generate_dataset(noop, "./work/scratch", duration=1200.0,
+                 magnitudes=1, repeats=1, normal_runs=6)
+summary = train_detector(noop, "./work/scratch",
+                         methods=["zscore", "pca"])
+print(summary["selected"], summary["results"]["pca"]["detection_rate"])
+\end{lstlisting}
+
+And the command-line training pipeline of the README:
+
+\begin{lstlisting}[style=sh]
+python -m pyplant.ml.train --out artifacts --duration 3600 \
+       --magnitudes 3 --repeats 2 --normal-runs 6 --window 60 --stride 10
+\end{lstlisting}

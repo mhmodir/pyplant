@@ -1,0 +1,167 @@
+\chapter{Deep learning: the autoencoder detector}
+\label{ch:dl}
+
+PCA finds the best \emph{linear} subspace for normal data. The plant is not
+linear: Torricelli drains go as $\sqrt h$, the pump curve is quadratic and the
+valve is equal-percentage. An autoencoder learns a \emph{non-linear} manifold
+with the same scoring and the same contribution analysis. This chapter
+explains the neural-network theory behind it and how it is trained here.
+
+\section{Neural network fundamentals}
+
+\subsection{The neuron and the layer}
+A layer maps an input vector $\bm h^{(l-1)}$ to
+\begin{equation}
+  \bm h^{(l)} = \phi\big(W^{(l)}\bm h^{(l-1)} + \bm b^{(l)}\big),
+\end{equation}
+with weights $W^{(l)}$, biases $\bm b^{(l)}$ and an element-wise non-linear
+activation $\phi$. Stacking layers gives a multilayer perceptron (MLP), which
+by the universal approximation theorem can represent any continuous function
+on a compact set given enough units.
+
+\subsection{Activation}
+pyplant uses the hyperbolic tangent,
+\begin{equation}
+  \tanh(a) = \frac{e^a - e^{-a}}{e^a + e^{-a}}, \qquad
+  \tanh'(a) = 1 - \tanh^2(a).
+\end{equation}
+It is smooth, zero-centred (which suits standardised inputs) and saturates
+gently. The output layer is linear, because standardised features are not
+bounded.
+
+\subsection{Learning: loss, backpropagation and Adam}
+Training minimises the mean squared error over a batch $\mathcal B$,
+\begin{equation}
+  \mathcal L(\Theta) = \frac{1}{|\mathcal B|}\sum_{i\in\mathcal B}
+  \lVert \bm z_i - f_\Theta(\bm z_i)\rVert^2 + \alpha\lVert\Theta\rVert^2 ,
+\end{equation}
+where the second term is a small L2 weight penalty ($\alpha = 10^{-4}$, the
+scikit-learn default). Gradients $\nabla_\Theta\mathcal L$ are computed by
+backpropagation, the chain rule applied layer by layer from the output back
+to the input. Parameters are updated with Adam, which keeps running averages
+of the gradient and its square:
+\begin{align}
+  \bm m_t &= \beta_1 \bm m_{t-1} + (1-\beta_1)\bm g_t, &
+  \bm v_t &= \beta_2 \bm v_{t-1} + (1-\beta_2)\bm g_t^2, \\
+  \Theta_t &= \Theta_{t-1} - \eta\,\frac{\hat{\bm m}_t}{\sqrt{\hat{\bm v}_t}+\epsilon},
+  & \hat{\bm m}_t &= \frac{\bm m_t}{1-\beta_1^t},\;
+    \hat{\bm v}_t = \frac{\bm v_t}{1-\beta_2^t},
+\end{align}
+with learning rate $\eta = 10^{-3}$, $\beta_1=0.9$, $\beta_2=0.999$.
+
+\subsection{Generalisation and early stopping}
+A network with enough capacity can memorise its training set, in which case it
+reconstructs \emph{everything} well, faults included, and becomes useless as a
+detector. 15\% of the training windows are held back as a validation set, and
+training stops when the validation loss has not improved for 25 epochs
+(\emph{early stopping}), up to a maximum of 1500 iterations.
+
+\section{The autoencoder}
+
+An autoencoder is a network trained to reproduce its own input through a
+narrow \emph{bottleneck}. The encoder compresses the 48 standardised features
+to 8 numbers; the decoder expands them back. Because the bottleneck is
+narrower than the input, the network can reproduce only inputs that resemble
+what it was trained on: it learns the manifold of normal operation.
+
+\begin{figure}[htbp]
+\centering
+\scalebox{0.8}{%
+\begin{tikzpicture}[x=2.3cm,y=0.42cm,
+  n/.style={circle,draw=slate,fill=panelgrey,minimum size=3.2mm,inner sep=0pt},
+  b/.style={n,fill=accent!40}]
+  \foreach \l/\k/\style in {0/12/n,1/8/n,2/3/b,3/8/n,4/12/n}{
+    \foreach \i in {1,...,\k}{
+      \node[\style] (L\l-\i) at (\l,{\i-(\k+1)/2}) {};
+    }
+  }
+  \foreach \a/\ka/\b/\kb in {0/12/1/8,1/8/2/3,2/3/3/8,3/8/4/12}{
+    \foreach \i in {1,...,\ka}{\foreach \j in {1,...,\kb}{
+      \draw[slate!25] (L\a-\i) -- (L\b-\j);}}
+  }
+  \node[below,font=\footnotesize,align=center] at (0,-7) {input $\bm z$\\48};
+  \node[below,font=\footnotesize,align=center] at (1,-7) {hidden\\32, tanh};
+  \node[below,font=\footnotesize,align=center] at (2,-7) {bottleneck\\8, tanh};
+  \node[below,font=\footnotesize,align=center] at (3,-7) {hidden\\32, tanh};
+  \node[below,font=\footnotesize,align=center] at (4,-7) {output $\hat{\bm z}$\\48, linear};
+  \draw[decorate,decoration={brace,amplitude=5pt}] (-0.1,7.2) -- node[above=5pt,font=\small]{encoder} (2.1,7.2);
+  \draw[decorate,decoration={brace,amplitude=5pt}] (1.9,8.6) -- node[above=5pt,font=\small]{decoder} (4.1,8.6);
+\end{tikzpicture}}
+\caption{The 48--32--8--32--48 autoencoder (drawn with fewer units). It is
+trained to output its input.}
+\label{fig:ae}
+\end{figure}
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Setting & Value & Field in \code{AutoencoderDetector} \\
+\midrule
+hidden layers & (32, 8, 32) & \code{hidden} \\
+activation & tanh & fixed \\
+optimiser & Adam, $\eta = 10^{-3}$ & fixed \\
+maximum iterations & 1500 & \code{max_iter} \\
+early stopping & 15\% validation, patience 25 & fixed \\
+random seed & 0 & \code{seed} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Relationship to PCA}
+A linear autoencoder (identity activations) trained with MSE learns exactly
+the principal subspace: its optimum spans the same space as the top $k$
+principal components. PCA is therefore the linear special case, and the
+autoencoder earns its place only if the non-linearity buys detection that PCA
+misses. That is why both are trained and the comparison is kept on record.
+
+\section{Scoring, threshold and isolation}
+
+The autoencoder uses the same machinery as PCA:
+\begin{equation}
+  a_\text{AE}(\bm x) = \lVert \bm z - f_\Theta(\bm z) \rVert^2,
+\end{equation}
+the same calibration quantile, the same health index and the same
+per-channel contributions of the residual (Chapter~\ref{ch:ml}). Only the
+reconstruction changes.
+
+\begin{figure}[htbp]
+\centering
+\scalebox{0.8}{%
+\begin{tikzpicture}[node distance=7mm and 10mm]
+  \node[box] (x) {window $\bm x$};
+  \node[box,right=of x] (z) {standardise\\$\bm z$};
+  \node[hot,right=of z] (f) {reconstruct\\$\hat{\bm z}=f(\bm z)$};
+  \node[box,right=of f] (r) {residual\\$\bm r=\bm z-\hat{\bm z}$};
+  \node[box,above right=4mm and 10mm of r] (s) {score $\lVert\bm r\rVert^2$\\$\to$ HI, flag};
+  \node[box,below right=4mm and 10mm of r] (c) {$r_j^2$ by channel\\$\to$ top channel};
+  \draw[flow] (x) -- (z);
+  \draw[flow] (z) -- (f);
+  \draw[flow] (f) -- (r);
+  \draw[flow] (r) |- (s);
+  \draw[flow] (r) |- (c);
+\end{tikzpicture}}
+\caption{One scoring pass, identical for PCA and the autoencoder.}
+\label{fig:aescore}
+\end{figure}
+
+\section{Practical advice}
+
+\begin{itemize}
+  \item \textbf{More data before more layers.} With the Quick preset there are
+        only a few normal runs; a bigger network will memorise them. Use the
+        Standard or Thorough preset before changing \code{hidden}.
+  \item \textbf{Bottleneck width} controls the trade-off: too wide and faults
+        reconstruct well (missed detections), too narrow and normal variation
+        does not (false alarms). 8 is a good starting point for 48 features.
+  \item \textbf{Seeds matter.} Training is stochastic. Compare methods over
+        two or three seeds before concluding one is better.
+  \item \textbf{Check against PCA.} If the autoencoder does not beat PCA on
+        detection rate and false alarms, deploy PCA. The selection rule does
+        this automatically.
+\end{itemize}
+
+To change the architecture:
+\begin{lstlisting}
+from pyplant.ml.detector import AutoencoderDetector
+det = AutoencoderDetector(quantile=0.995, hidden=(64, 16, 64), max_iter=3000, seed=1)
+\end{lstlisting}
