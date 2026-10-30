@@ -21,6 +21,8 @@ fault detection, all driven from one GUI.
 [Results](#results) ·
 [Docs](#documentation)
 
+![pyplant on one page: the plant, the loop, and four detectors](docs/manual/figures/pyplant-poster.png)
+
 ![Walkthrough: start the stack, inject a leak, train a detector](docs/manual/pyplant-walkthrough.gif)
 
 </div>
@@ -321,31 +323,17 @@ Every flag, the workspace `config.json`, platform notes and troubleshooting:
 
 ## Documentation
 
-<table>
-<tr>
-<td width="62%" valign="top">
-
 | | |
 | --- | --- |
 | [Tutorial](docs/TUTORIAL.md) | one leak, cold start to trained detector, screenshot at every step |
 | [Quick-start guide](docs/pdf/pyplant-quickguide.pdf) | 20-page PDF |
 | [User manual](docs/pdf/pyplant-manual.pdf) | 88-page PDF, the full reference |
+| [Poster](docs/pdf/pyplant-poster.pdf) | the project on one page |
 | [CONTROL.md](docs/CONTROL.md) | the plant model, the PID, IMC tuning |
 | [DETECTION.md](docs/DETECTION.md) | the four detectors, evaluation, results |
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | processes, protocols, design rules, extending |
 | [DEPLOYMENT.md](docs/DEPLOYMENT.md) | installing, running, Docker, troubleshooting |
 | [DESIGN_NOTES.md](docs/DESIGN_NOTES.md) | how it was built, and the bugs measurement found |
-
-</td>
-<td width="38%" valign="top">
-
-<a href="docs/pdf/pyplant-poster.pdf"><img src="docs/manual/figures/pyplant-poster.png" alt="The project poster" width="100%"></a>
-
-<sub>The poster. Click for the PDF.</sub>
-
-</td>
-</tr>
-</table>
 
 The design notes are the most interesting read. A PID that slammed the valve
 shut on its first scan, a PLC timer that never fired because ten times 0.1 is
