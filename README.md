@@ -125,6 +125,287 @@ There is no workbench in this mode. The HMI is the interface.
 If the PLC starts before the plant is listening, it exits and is restarted,
 which is what a controller does when its field device is late.
 
+## One leak, from a cold start to a trained detector
+
+This is the walkthrough in the manual, on workspace `work/manual` at 1×.
+Unit 1 is in automatic at 300 mm. The operator raises the setpoint to 340 mm,
+then a hole of effective area `5e-5` m² opens in tank 1. The level comes back.
+The valve does not.
+
+```bash
+python -m pyplant.workbench.app --workspace ./work/manual
+```
+
+Open <http://127.0.0.1:8050>.
+
+1. **Run it offline first.** On Quick start, leave the scenario on *Leak in
+   tank 1*, length 30 minutes, and press **Run scenario**. Nothing else has
+   to be running. The level ends where it started (`LT101` changes by about
+   +0.02 mm). The controller output rises about 9.6 points, and the inflow
+   rises by the leak flow, about 2.9 L/min. Onset is at 720 s. At that
+   instant the level dips about 20 mm and recovers; the valve stays further
+   open for as long as the leak lasts.
+2. **Start the live stack.** On Runtime, keep speed at 1× and press **Start
+   stack**. The header goes green at 4/4. Healthy steady state is about
+   `LT101` 300.0 mm, `LT102` 176.8 mm, `FCV101` 66%, inflow and outflow both
+   near 10 L/min, pump discharge near 50 kPa, and a scan of a few
+   milliseconds inside a 100 ms budget.
+3. **Step the setpoint.** On the LIC101 faceplate write 340 and press
+   **Write**. The output kicks toward 80%, the level reaches 340 mm in about
+   a minute with no overshoot, and the output settles near 69%. A fuller
+   tank drains faster, so holding it takes a slightly more open valve.
+4. **Inject the leak.** On Faults, press *Leak in tank 1*. The ground-truth
+   table should show reported and true values within the noise: the hole is
+   in the process, so no transmitter is lying. About two minutes later the
+   valve is near 93% and the level is climbing back. Inflow is up around
+   18 L/min and pump pressure has fallen, because the pump is further out on
+   its curve. Open the HMI at <http://127.0.0.1:5405>. The alarm list stays
+   empty. The level never crossed a limit.
+5. **Train something that can see it.** Clear the fault. On Data, press
+   **Quick** and **Generate**. The live plant keeps running; the dataset is
+   built by the fast runner in another process. On Model, train all four
+   detectors. A detection is three flagged windows in a row. Compare
+   detection rate, delay and which channel each method blames.
+
+Press **Stop** when you are done. The same path with the Standard preset
+(one-hour runs, three magnitudes, the repeats in the results below) is what
+the numbers in this file come from.
+
+## Control
+
+LIC101 holds the level in tank 1. It reads the process value `LT101`,
+subtracts it from the setpoint, and moves the valve command `FCV101_OP`. The
+loop is reverse-acting: when the level falls, the output rises. The code is
+`pyplant/plc/pid.py`. The plant it acts on is `pyplant/core/hybrid_tank.py`.
+
+### What the controller is pushing against
+
+Two vertical tanks. Volume balances, with a leak only on tank 1:
+
+$$
+A_1 \frac{dh_1}{dt} = q_\mathrm{in} - q_{12} - q_\mathrm{leak},
+\qquad
+A_2 \frac{dh_2}{dt} = q_{12} - q_\mathrm{out}.
+$$
+
+Each gravity drain follows Torricelli, $q = C_d A \sqrt{2gh}$. The
+interconnect can foul ($C_d A_{12}$ shrinks) and the leak is an extra orifice
+on tank 1. The centrifugal pump is a quadratic curve, shut-off 60 kPa and
+run-out 25 L/min, and wear scales the whole curve down. The valve is
+equal-percentage with rangeability 30, so equal steps of the stem change the
+flow by equal percentages, and under the falling pump curve the installed
+characteristic is roughly linear. Pump pressure depends on flow and flow
+depends on pump pressure; substituting and solving the quadratic gives
+$q_\mathrm{in}$ in closed form, so a 50 ms integration step needs no
+iteration and the model is not stiff.
+
+Around the design point the tank behaves as a first-order lag,
+
+$$
+G(s) = \frac{K}{\tau s + 1}, \qquad K = 15.4\ \mathrm{mm}/\%, \quad \tau = 72\ \mathrm{s}.
+$$
+
+The open-loop time constant is why a slow fault takes minutes to show at 1×
+and about a tenth of that at 10×.
+
+### The PID, in velocity form
+
+The continuous law, in ISA standard form, is
+
+$$
+u(t) = K_c \left( e(t) + \frac{1}{T_i}\int_0^t e(\tau)\,d\tau + T_d \frac{de}{dt} \right),
+\qquad e = \mathrm{SP} - \mathrm{PV}.
+$$
+
+Proportional reacts to the error now, and alone it leaves an offset whenever
+a non-zero valve opening is required to hold the level. Integral keeps moving
+the valve until that error is exactly zero. Derivative anticipates; on a
+noisy level it hurts, so LIC101 runs with $T_d = 0$.
+
+The code does not store an integral. It stores the output, and each scan adds
+an increment. With backward differences, sample time $T_s$, and the derivative
+taken on a filtered measurement $y^f$ rather than on the error:
+
+$$
+\Delta u_k = K_c(e_k - e_{k-1}) + K_c\frac{T_s}{T_i} e_k
+- K_c\frac{T_d}{T_s}\big(y^f_k - 2y^f_{k-1} + y^f_{k-2}\big),
+$$
+
+$$
+u_k = \mathrm{clip}(u_{k-1} + \Delta u_k,\ 0,\ 100).
+$$
+
+Two properties that need extra logic in the positional form fall out of this
+one. When the valve hits 0% or 100%, the increment that would have gone past
+the stop is thrown away, so nothing keeps integrating behind the limit and
+the output leaves the stop on the first scan the error changes sign.
+In manual, the output is whatever the operator wrote and the error history
+is kept current; returning to auto continues from that value, so the stem
+does not jump. Differentiating the measurement, after a 5 s low-pass,
+avoids the kick a setpoint step would otherwise put through the derivative.
+The first scan copies the measured stem `ZT101` into the output. Starting
+from 0% on a plant sitting at 66% would shut the valve, dead-head the pump
+and trip the low-flow interlock immediately.
+
+### IMC tuning
+
+Internal model control picks the gains so the closed loop behaves like a
+first-order lag of time constant $\lambda$, chosen by the engineer. For
+$G(s)$ above, that controller is a PI:
+
+$$
+K_c = \frac{\tau}{K\lambda}, \qquad T_i = \tau,
+\qquad
+\frac{\mathrm{PV}(s)}{\mathrm{SP}(s)} = \frac{1}{\lambda s + 1}.
+$$
+
+With $\lambda = 13$ s the loop is about 5.5 times faster than the open plant,
+which leaves margin for the valve lag, the sample time and the nonlinearity
+the first-order model leaves out:
+
+| | value | role |
+| --- | --- | --- |
+| $K_c$ | 0.35 %/mm | controller gain |
+| $T_i$ | 72 s | integral time. 0 turns integral off |
+| $T_d$ | 0 | derivative time. 0 turns derivative off |
+| $T_f$ | 5 s | filter on the measurement before the derivative |
+| $T_s$ | 0.1 s | PLC scan. The output is held between scans |
+
+A 50 mm setpoint step on this tuning settles to 2% in about 40–50 s, with no
+overshoot and no offset. The measured loop matches that.
+
+The PLC holds its output for the whole scan, a zero-order hold, which is
+about $T_s/2 = 50$ ms of dead time. That is nothing next to $\lambda = 13$ s.
+The simulator still integrates at 50 ms with the input held, because a PID
+that was only ever stepped in continuous time usually looks better in
+simulation than it does on a scan.
+
+### Why the level comes back
+
+A leak is a load disturbance. A PI controller has a pole at $s = 0$, so the
+final-value theorem gives zero steady-state error to a step disturbance. The
+level returns to the setpoint exactly. The valve opening is the record of
+how much extra flow the loop had to supply. A detector that watches only
+`LT101` is looking at the one signal the controller has been paid to keep
+still. That is why every detector below is given the controller output, the
+stem position and the three physics residuals.
+
+## Fault detection
+
+Training never sees a fault. A plant has a long record of ordinary operation
+and very few labelled failures, so a classifier trained on faults would be
+learning the rarest thing it will meet, and it would miss a mode nobody has
+named yet. Each detector learns normal operation and scores how far a new
+window is from it. Fault runs are used only afterwards, to measure the score.
+The implementation is `pyplant/ml`.
+
+A window is 60 samples at 1 Hz, one minute, stepped forward by 10 samples. It
+is labelled by its last sample, so a window that merely contains the onset is
+still called normal and the detection delay cannot come out negative. One
+sample cannot show a drift, a shift or a limit cycle; the window can.
+
+Twelve channels go in. Nine are tags: `LT101`, `LT102`, `FT101`, `FT102`,
+`PT101`, `ZT101`, `FCV101_OP`, `LIC101_SP`, `LIC101_ERR`. Three are computed
+from a balance the fault breaks: `FLOW_IMBALANCE`, `HEAD_RESIDUAL` and
+`OP_MINUS_ZT`, as in the table under Results. Each channel becomes four
+numbers over the window, last value, mean, standard deviation and
+least-squares slope, so a window is 48 features named `CHANNEL::stat`. Every
+detector then standardises with the mean and standard deviation of the normal
+training runs. Thresholds are the 0.995 quantile of the score on held-out
+normal runs, never on the data the model was fit to. A window is flagged
+when its score exceeds that threshold. The health index pins the threshold
+at 50 and gives one decade of score per 50 points,
+
+$$
+\mathrm{HI} = \mathrm{clip}\!\left(50\log_{10}\frac{a}{\theta} + 50,\ 0,\ 100\right),
+$$
+
+so an alarm limit on `HEALTH_INDEX` means the same thing after a retrain.
+Contributions sum the squared residual by channel; the top channel is the
+isolation result. The isolation forest has no reconstruction, so its
+contributions fall back to the squared standardised features.
+
+### Z-score limits
+
+No model. In standardised units the normal mean is zero, and the score is the
+squared distance from it, $a = \sum_j z_j^2$. If the 48 features were
+independent Gaussians this would be $\chi^2$ with 48 degrees of freedom and a
+fixed limit would set a known false-alarm rate. They are not independent
+(`LT101` and `LIC101_ERR` are almost the same signal), so the limit is the
+calibration quantile. This is the baseline the other three have to beat.
+
+### PCA
+
+Classical multivariate statistical process control. Normal operation, tied
+together by a few physical relationships, lies near a low-dimensional
+subspace. A fault that breaks a relationship leaves that subspace even when
+every single tag is still inside its own normal range.
+
+The covariance of the standardised training windows is diagonalised and the
+smallest set of components that keeps 95% of the variance is kept. A window
+is projected onto that subspace and back. The score is the squared prediction
+error, the distance off the subspace, $\lVert z - \hat z \rVert^2$. The faults
+here break a correlation, so that off-subspace distance is the statistic that
+sees them. The per-feature residual $z - \hat z$ is what the contribution
+plot sums.
+
+### Isolation forest
+
+Anomalies are few and different, so a random split isolates them sooner than
+it isolates a normal point. Two hundred trees are each grown on a random
+subsample by picking a random feature and a random cut between its min and
+max, until every point sits alone. The score is the average path length,
+normalised by the expected depth of a binary search tree and mapped into
+$(0, 1]$:
+
+$$
+a(x) = 2^{-\mathbb{E}[h(x)] / c(\psi)}.
+$$
+
+Values near 1 are anomalies. The code stores the negated scikit-learn
+`score_samples`, which is this quantity, so larger is still worse and the
+same threshold and health index apply. Isolation uses $z_j^2$, the same
+per-feature residual as the z-score detector.
+
+### Autoencoder
+
+PCA is the best *linear* subspace. This plant is not linear: Torricelli
+drains go as $\sqrt{h}$, the pump curve is quadratic, and the valve is
+equal-percentage. The autoencoder learns a non-linear manifold with the same
+score and the same contributions. A linear autoencoder trained on squared
+error would recover the principal subspace, so PCA is the special case, and
+the network only earns its place if the non-linearity detects faults PCA
+misses. Both are always trained, and the comparison is kept.
+
+The network is a multilayer perceptron, 48–32–8–32–48. Hidden units use
+$\tanh$, which is smooth and zero-centred on standardised inputs. The output
+layer is linear, because those inputs are unbounded. The encoder squeezes 48
+numbers through a bottleneck of 8; the decoder tries to rebuild them. Trained
+only on normal windows, it can rebuild what looks like normal operation and
+fails on the rest. The score is the squared reconstruction error,
+$\lVert z - f_\Theta(z) \rVert^2$.
+
+Training minimises mean squared error plus a small L2 penalty on the weights
+($\alpha = 10^{-4}$). Gradients come from backpropagation. Adam keeps a
+running average of the gradient and of its square, with learning rate
+$10^{-3}$, $\beta_1 = 0.9$ and $\beta_2 = 0.999$. Fifteen percent of the
+training windows are held out, and training stops after 25 epochs without an
+improvement on them, or at 1500 iterations. A network that memorises the
+training set reconstructs faults too, and then it detects nothing. With only
+a few normal runs, add data before adding layers. A wider bottleneck lets
+faults reconstruct; a narrower one rejects ordinary variation. Eight is the
+default for 48 features.
+
+```python
+from pyplant.ml.detector import AutoencoderDetector
+det = AutoencoderDetector(quantile=0.995, hidden=(64, 16, 64), max_iter=3000, seed=1)
+```
+
+`make_detector("zscore" | "pca" | "isolation_forest" | "autoencoder")` builds
+any of the four with the same `fit`, `calibrate`, `health` and `top_channel`
+interface. The numbers those four produce on the standard scenario grid are
+below.
+
 ## Results
 
 58 one-hour scenarios: 10 normal runs and seven fault modes, each at three
